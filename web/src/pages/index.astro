@@ -13,11 +13,14 @@ import "../styles/global.css";
     <main class="page">
       <header class="topbar">
         <div class="brand">
-          <h1>LLM Training Estimator</h1>
-          <p>Fill the unified YAML schema by block, validate typed inputs, and estimate memory, time, GPU-hours, and rental cost.</p>
+          <h1 id="appTitle">LLM Training Estimator</h1>
+          <p id="appDescription">
+            Fill the unified schema block by block, validate typed inputs, and estimate
+            memory, time, GPU-hours, and rental cost.
+          </p>
         </div>
         <div class="actions">
-          <button class="button" id="languageToggle" type="button">Meaning: English</button>
+          <button class="button" id="languageToggle" type="button">Language: English</button>
           <button class="button" id="loadExample" type="button">Load Dense Example</button>
           <button class="button" id="clearForm" type="button">Clear</button>
           <button class="button primary" id="estimateButton" type="button">Estimate</button>
@@ -29,8 +32,9 @@ import "../styles/global.css";
 
         <aside class="panel">
           <div id="status" class="notice" hidden></div>
+
           <section class="result-card">
-            <h2>Progress</h2>
+            <h2 id="progressTitle">Progress</h2>
             <div class="progress-shell">
               <div class="progress-bar">
                 <div class="progress-fill" id="progressFill" style="width: 0%"></div>
@@ -40,36 +44,34 @@ import "../styles/global.css";
                 <span id="progressEta">Estimated time: n/a</span>
               </div>
             </div>
-            <div class="summary-grid" id="progressSteps">
-              <div class="metric"><span>Validation</span><strong>Waiting</strong></div>
-              <div class="metric"><span>Estimate</span><strong>Waiting</strong></div>
-              <div class="metric"><span>Summary</span><strong>Waiting</strong></div>
-              <div class="metric"><span>Display</span><strong>Waiting</strong></div>
-            </div>
+            <div class="summary-grid progress-grid" id="progressSteps"></div>
           </section>
 
           <section class="result-card">
-            <h2>Result</h2>
-            <div class="summary-grid" id="metrics">
-              <div class="metric"><span>Runnable</span><strong>Not run</strong></div>
-              <div class="metric"><span>Risk level</span><strong>Not run</strong></div>
-              <div class="metric"><span>Avg memory / GPU</span><strong>Not run</strong></div>
-              <div class="metric"><span>Utilization</span><strong>Not run</strong></div>
-              <div class="metric"><span>Time</span><strong>Not run</strong></div>
-              <div class="metric"><span>GPU-hours</span><strong>Not run</strong></div>
-              <div class="metric"><span>Cost</span><strong>Not run</strong></div>
-              <div class="metric"><span>Summary provider</span><strong>Not run</strong></div>
-            </div>
-            <p class="helper" id="memoryNote">Memory is shown as average per GPU, compared against the per-GPU limit.</p>
+            <h2 id="resultTitle">Result</h2>
+            <div class="summary-grid" id="metrics"></div>
+            <p class="helper" id="memoryNote">
+              Memory is shown as average per GPU, compared against the per-GPU limit.
+            </p>
           </section>
 
           <section class="result-card">
-            <h3>Summary Analysis</h3>
+            <h3 id="comparisonTitle">Hardware Comparison</h3>
+            <p class="helper" id="comparisonHelper">
+              Select multiple GPU presets in the hardware block to compare training time and
+              cost.
+            </p>
+            <div id="comparisonInsights" class="helper"></div>
+            <div id="comparison" class="comparison-wrap"></div>
+          </section>
+
+          <section class="result-card">
+            <h3 id="summaryTitle">Summary Analysis</h3>
             <div id="summary" class="markdown">Run an estimate to generate a Markdown analysis.</div>
           </section>
 
           <section class="result-card">
-            <h3>Raw Result</h3>
+            <h3 id="rawResultTitle">Raw Result</h3>
             <pre id="rawResult" class="raw">{}</pre>
           </section>
         </aside>
@@ -78,37 +80,322 @@ import "../styles/global.css";
 
     <script>
       const API_BASE = "http://127.0.0.1:8000";
+
       let language = "en";
       let progressTimer = null;
       let currentProgressPercent = 0;
+      let latestResult = null;
+      let latestCompareData = null;
+      let latestEstimatePayload = null;
+      let hardwareOptions = [];
+      let progressState = {
+        stageKey: "idle",
+        etaMode: "unknown",
+        etaValue: 0,
+        steps: ["waiting", "waiting", "waiting", "waiting", "waiting"],
+      };
 
       function field(path, type, meaningEn, meaningZh, options = {}) {
         return { path, type, meaning: { en: meaningEn, zh: meaningZh }, ...options };
       }
 
+      const text = {
+        en: {
+          appTitle: "LLM Training Estimator",
+          appDescription:
+            "Fill the unified schema block by block, validate typed inputs, and estimate memory, time, GPU-hours, and rental cost.",
+          languageToggle: "Language: English",
+          loadExample: "Load Dense Example",
+          clearForm: "Clear",
+          estimateButton: "Estimate",
+          progressTitle: "Progress",
+          resultTitle: "Result",
+          comparisonTitle: "Hardware Comparison",
+          comparisonHelper:
+            "Select multiple GPU presets in the hardware block to compare training time and cost.",
+          summaryTitle: "Summary Analysis",
+          rawResultTitle: "Raw Result",
+          progressLabels: ["Validation", "Estimate", "Compare", "Summary", "Display"],
+          progressStates: {
+            idle: "Idle",
+            waiting: "Waiting",
+            running: "Running",
+            queued: "Queued",
+            done: "Done",
+            skipped: "Skipped",
+            unavailable: "Unavailable",
+            complete: "Complete",
+            error: "Error",
+          },
+          progressStages: {
+            idle: "Idle",
+            validating: "Validating configuration",
+            estimating: "Running estimator pipeline",
+            estimateReady: "Estimate ready",
+            comparing: "Comparing hardware presets",
+            summarizing: "Generating summary analysis",
+            finalizing: "Finalizing results",
+            complete: "Complete",
+            warning: "Completed with warning",
+          },
+          eta: {
+            unknown: "Estimated time: n/a",
+            left: (seconds) => `Estimated time left: ${seconds}s`,
+            compare: "Estimated time left: 2-4s",
+            summary: "Estimated time left: 10-20s",
+            ready: "Estimated time left: 0s",
+          },
+          metrics: {
+            runnable: "Runnable",
+            risk: "Risk level",
+            memory: "Avg memory / GPU",
+            utilization: "Utilization",
+            time: "Time",
+            gpuHours: "GPU-hours",
+            cost: "Cost",
+            provider: "Summary provider",
+          },
+          values: {
+            notRun: "Not run",
+            pending: "Pending",
+            noSummaryRequested: "No summary requested.",
+            yes: "Yes",
+            no: "No",
+            current: "Current",
+            none: "None",
+            auto: "Auto",
+            noComparison: "No hardware comparison requested yet.",
+            comparisonLoading: "Comparing selected hardware presets...",
+            loadingOptions: "Loading hardware presets...",
+            unavailable: "Unavailable",
+          },
+          memoryNote: {
+            generic: "Memory is shown as average per GPU, compared against the per-GPU limit.",
+            withCount: (gpuCount) =>
+              `Memory is shown as average per GPU for ${gpuCount} GPUs, compared against the per-GPU limit.`,
+          },
+          status: {
+            loadingHardware: "Loading hardware presets...",
+            validating: "Validating inputs...",
+            estimateReady: "Estimate is ready. Rendering result immediately...",
+            waitingBackground: "Estimate is ready. Comparison and summary are still running...",
+            estimateComplete: "Estimate complete.",
+            compareComplete: "Comparison complete.",
+            summaryComplete: "Estimate and summary complete.",
+            allComplete: "Estimate, comparison, and summary complete.",
+            summaryWarning: "Estimate is available. Some background analysis failed or was unavailable.",
+          },
+          errors: {
+            required: "Required for estimate.",
+            integer: "Must be an integer.",
+            number: "Must be a number.",
+            fixFields: "Please fix highlighted fields first.",
+            min: (value) => `Must be >= ${value}.`,
+            max: (value) => `Must be <= ${value}.`,
+          },
+          summary: {
+            placeholder: "Run an estimate to generate a Markdown analysis.",
+            waiting: "Waiting for summary analysis...",
+            unavailableTitle: "Summary unavailable.",
+          },
+          comparison: {
+            placeholder: "No hardware comparison requested yet.",
+            waiting: "Comparing selected hardware presets...",
+            unavailableTitle: "Comparison failed.",
+            presetMeaning:
+              "Choose the primary hardware preset for the main estimate. It auto-fills hardware, parallel GPU count, and price profile fields.",
+            presetLabel: "hardware.gpu_type",
+            presetType: "preset selector",
+            presetEmpty: "Manual / custom",
+            compareMeaning:
+              "Choose one or more GPU presets to run side-by-side comparison for duration and cost. The current hardware profile is added automatically.",
+            compareLabel: "hardware.gpu_type[]",
+            compareType: "multi-select compare",
+            loading: "Loading hardware presets...",
+            noOptions: "No hardware presets available.",
+            currentBadge: "Current",
+            insightFastest: (label, hours) => `Fastest: ${label} at ${hours}.`,
+            insightCheapest: (label, cost) => `Cheapest: ${label} at ${cost}.`,
+            insightOnlyOne: "Select at least two presets to make the comparison more interesting.",
+            columns: {
+              profile: "Profile",
+              gpu: "GPU",
+              count: "GPUs",
+              memory: "Avg memory / GPU",
+              time: "Time",
+              cost: "Cost",
+              deltaTime: "Delta time",
+              deltaCost: "Delta cost",
+              runnable: "Runnable",
+              risk: "Risk",
+              notes: "Notes",
+            },
+          },
+          hardwarePresetWarning:
+            "Selected preset GPU count is incompatible with the current tensor/pipeline parallel layout, so data parallel size was not auto-adjusted.",
+          checkboxEnabled: "enabled",
+          fieldMetaRequired: "required",
+        },
+        zh: {
+          appTitle: "LLM 训练估算器",
+          appDescription:
+            "按统一 schema 分块填写参数，进行类型校验，并估算显存、训练时长、GPU-hours 与租赁成本。",
+          languageToggle: "语言：中文",
+          loadExample: "加载 Dense 示例",
+          clearForm: "清空",
+          estimateButton: "开始估算",
+          progressTitle: "进度",
+          resultTitle: "结果",
+          comparisonTitle: "硬件对比",
+          comparisonHelper: "在 hardware 模块中多选 GPU 预设，可比较不同设备的训练时长与成本。",
+          summaryTitle: "总结分析",
+          rawResultTitle: "原始结果",
+          progressLabels: ["校验", "估算", "对比", "总结", "展示"],
+          progressStates: {
+            idle: "空闲",
+            waiting: "等待中",
+            running: "进行中",
+            queued: "已排队",
+            done: "已完成",
+            skipped: "已跳过",
+            unavailable: "不可用",
+            complete: "完成",
+            error: "出错",
+          },
+          progressStages: {
+            idle: "空闲",
+            validating: "正在校验配置",
+            estimating: "正在运行估算 pipeline",
+            estimateReady: "估算结果已就绪",
+            comparing: "正在比较硬件预设",
+            summarizing: "正在生成总结分析",
+            finalizing: "正在整理结果",
+            complete: "完成",
+            warning: "已完成，但有警告",
+          },
+          eta: {
+            unknown: "预计时间：暂无",
+            left: (seconds) => `预计剩余时间：${seconds} 秒`,
+            compare: "预计剩余时间：2-4 秒",
+            summary: "预计剩余时间：10-20 秒",
+            ready: "预计剩余时间：0 秒",
+          },
+          metrics: {
+            runnable: "是否可运行",
+            risk: "风险等级",
+            memory: "平均每卡显存",
+            utilization: "显存利用率",
+            time: "训练时长",
+            gpuHours: "GPU-hours",
+            cost: "成本",
+            provider: "总结模型来源",
+          },
+          values: {
+            notRun: "未运行",
+            pending: "等待中",
+            noSummaryRequested: "未请求总结分析。",
+            yes: "是",
+            no: "否",
+            current: "当前",
+            none: "无",
+            auto: "自动",
+            noComparison: "尚未请求硬件对比。",
+            comparisonLoading: "正在比较所选硬件预设...",
+            loadingOptions: "正在加载硬件预设...",
+            unavailable: "不可用",
+          },
+          memoryNote: {
+            generic: "显存以平均每张 GPU 的数值展示，并与单卡显存上限进行比较。",
+            withCount: (gpuCount) =>
+              `显存以 ${gpuCount} 张 GPU 的平均单卡数值展示，并与单卡显存上限进行比较。`,
+          },
+          status: {
+            loadingHardware: "正在加载硬件预设...",
+            validating: "正在校验输入...",
+            estimateReady: "估算结果已返回，正在立即展示...",
+            waitingBackground: "估算结果已可见，硬件对比与总结分析仍在后台处理中...",
+            estimateComplete: "估算完成。",
+            compareComplete: "硬件对比完成。",
+            summaryComplete: "估算与总结分析已完成。",
+            allComplete: "估算、硬件对比与总结分析均已完成。",
+            summaryWarning: "估算结果可用，但部分后台分析失败或暂不可用。",
+          },
+          errors: {
+            required: "该字段为估算必填项。",
+            integer: "必须为整数。",
+            number: "必须为数字。",
+            fixFields: "请先修正高亮字段。",
+            min: (value) => `必须大于或等于 ${value}。`,
+            max: (value) => `必须小于或等于 ${value}。`,
+          },
+          summary: {
+            placeholder: "运行一次估算后，这里会生成 Markdown 总结分析。",
+            waiting: "正在等待总结分析...",
+            unavailableTitle: "总结分析暂不可用。",
+          },
+          comparison: {
+            placeholder: "尚未请求硬件对比。",
+            waiting: "正在比较所选硬件预设...",
+            unavailableTitle: "硬件对比失败。",
+            presetMeaning:
+              "选择主硬件预设用于主结果估算。它会自动填充 hardware、并行 GPU 数量和 price profile 相关字段。",
+            presetLabel: "hardware.gpu_type",
+            presetType: "预设选择器",
+            presetEmpty: "手动 / 自定义",
+            compareMeaning:
+              "选择一个或多个 GPU 预设，横向比较训练时长与成本。当前硬件 profile 会自动加入比较。",
+            compareLabel: "hardware.gpu_type[]",
+            compareType: "多选对比",
+            loading: "正在加载硬件预设...",
+            noOptions: "没有可用的硬件预设。",
+            currentBadge: "当前",
+            insightFastest: (label, hours) => `最快：${label}，训练时长 ${hours}。`,
+            insightCheapest: (label, cost) => `最便宜：${label}，成本 ${cost}。`,
+            insightOnlyOne: "至少选择两个预设，横向对比会更有意义。",
+            columns: {
+              profile: "Profile",
+              gpu: "GPU",
+              count: "GPU 数",
+              memory: "平均每卡显存",
+              time: "训练时长",
+              cost: "成本",
+              deltaTime: "时长差值",
+              deltaCost: "成本差值",
+              runnable: "可运行",
+              risk: "风险",
+              notes: "说明",
+            },
+          },
+          hardwarePresetWarning:
+            "所选预设的 GPU 数量与当前 tensor / pipeline 并行布局不兼容，因此没有自动改写 data parallel size。",
+          checkboxEnabled: "启用",
+          fieldMetaRequired: "必填",
+        },
+      };
+
       const schema = [
         {
           id: "run",
           title: "run",
-          description: "Metadata",
+          description: { en: "Metadata", zh: "元数据" },
           fields: [
             field("version", "string", "Config schema version marker. Currently informational.", "配置 schema 版本标记，当前主要用于说明。", { default: "0.1" }),
             field("run.name", "string", "Run identifier used in reports and output JSON.", "运行名称，会出现在报告和输出 JSON 中。", { required: true }),
-            field("run.description", "string", "Human-readable note for this run.", "这次估算的人类可读说明。", { multiline: true }),
+            field("run.description", "string", "Human-readable note for this run.", "本次估算的人类可读说明。", { multiline: true }),
           ],
         },
         {
           id: "model",
           title: "model",
-          description: "Architecture and scale",
+          description: { en: "Architecture and scale", zh: "模型结构与规模" },
           fields: [
             field("model.name", "string", "Model name passed through to backend configs.", "模型名称，会传递给后端配置。", { required: true }),
-            field("model.architecture", "enum", "Select dense or mixture-of-experts validation behavior.", "选择 dense 或 MoE，并触发对应校验规则。", { options: ["dense", "moe"], default: "dense" }),
+            field("model.architecture", "enum", "Select dense or mixture-of-experts validation behavior.", "选择 dense 或 MoE，并触发对应的校验规则。", { options: ["dense", "moe"], default: "dense" }),
             field("model.total_params_b", "float", "Total model parameters in billions. Used by memory estimation.", "模型总参数量，单位为十亿。显存估算会使用。", { required: true }),
             field("model.active_params_b", "float", "Active parameters in billions. Dense defaults to total_params_b; MoE requires it.", "激活参数量，单位为十亿。dense 可留空，MoE 必填。", { nullable: true }),
             field("model.num_layers", "int", "Transformer layer count.", "Transformer 层数。", { required: true }),
             field("model.hidden_size", "int", "Hidden dimension.", "隐藏层维度。", { required: true }),
-            field("model.num_attention_heads", "int", "Attention head count.", "注意力头数量。", { required: true }),
+            field("model.num_attention_heads", "int", "Attention head count.", "注意力头数。", { required: true }),
             field("model.vocab_size", "int", "Vocabulary size.", "词表大小。", { required: true }),
             field("model.seq_len", "int", "Training sequence length.", "训练序列长度。", { required: true }),
             field("model.moe.num_experts", "int", "Total number of experts. Required for MoE; leave empty for dense.", "专家总数。MoE 必填，dense 留空。", { nullable: true }),
@@ -119,15 +406,15 @@ import "../styles/global.css";
         {
           id: "training",
           title: "training",
-          description: "Mode, precision, batch, tokens",
+          description: { en: "Mode, precision, batch, tokens", zh: "训练方式、精度、batch 与 token" },
           fields: [
-            field("training.mode", "enum", "Training method. Only full has precise backend estimates in this MVP.", "训练方式。当前 MVP 只有 full 会给出较完整后端估算。", { options: ["full", "lora", "qlora"], default: "full" }),
+            field("training.mode", "enum", "Training method. Only full has precise backend estimates in this MVP.", "训练方式。当前 MVP 只有 full 会给出较完整的后端估算。", { options: ["full", "lora", "qlora"], default: "full" }),
             field("training.precision", "enum", "Training precision. Low-bit training support depends on the backend.", "训练精度。低比特训练的后端支持可能不同。", { options: ["fp32", "fp16", "bf16", "int8", "int4"], default: "bf16" }),
             field("training.optimizer", "enum", "Optimizer passed to gpu-mem-calculator.", "传递给 gpu-mem-calculator 的优化器。", { options: ["adamw", "adamw_8bit", "sgd"], default: "adamw" }),
             field("training.micro_batch_size", "int", "Per-GPU micro batch size.", "每张 GPU 的 micro batch size。", { required: true }),
             field("training.gradient_accumulation_steps", "int", "Number of gradient accumulation steps.", "梯度累积步数。", { required: true }),
             field("training.global_batch_size", "int", "Global batch size used by llm-analysis.", "llm-analysis 使用的全局 batch size。", { required: true }),
-            field("training.epochs", "int", "Informational in the current MVP; token count drives time estimate.", "当前 MVP 中主要是信息字段；时间估算由 total_tokens_b 驱动。", { default: 1 }),
+            field("training.epochs", "int", "Informational in the current MVP; token count drives time estimate.", "当前 MVP 中主要是信息字段；时长估算由 total_tokens_b 驱动。", { default: 1 }),
             field("training.total_tokens_b", "float", "Total training tokens in billions.", "训练 token 总量，单位为十亿。", { required: true }),
             field("training.activation_checkpointing", "int", "Activation recomputation level from 0 to 4.", "激活重计算等级，取值范围 0 到 4。", { default: 0, min: 0, max: 4 }),
           ],
@@ -135,20 +422,20 @@ import "../styles/global.css";
         {
           id: "peft",
           title: "peft",
-          description: "Schema-only PEFT metadata",
+          description: { en: "Schema-only PEFT metadata", zh: "仅用于 schema 的 PEFT 元数据" },
           fields: [
             field("peft.enabled", "bool", "Enable the PEFT schema path. Must be false for full fine-tuning.", "启用 PEFT schema 路径。full fine-tuning 时必须为 false。", { default: false }),
             field("peft.method", "enum", "Must match training.mode when mode is lora or qlora.", "当 training.mode 为 lora 或 qlora 时必须一致。", { options: ["lora", "qlora"], nullable: true }),
             field("peft.trainable_params_b", "float", "Trainable parameter count in billions. Required for PEFT modes.", "可训练参数量，单位十亿。PEFT 模式必填。", { nullable: true }),
             field("peft.lora_rank", "int", "LoRA rank metadata.", "LoRA rank 元数据。", { nullable: true }),
             field("peft.lora_alpha", "int", "LoRA alpha metadata.", "LoRA alpha 元数据。", { nullable: true }),
-            field("peft.target_modules", "string_list", "Comma-separated target module names for LoRA metadata.", "LoRA 目标模块名，用逗号分隔。", { nullable: true, full: true }),
+            field("peft.target_modules", "string_list", "Comma-separated target module names for LoRA metadata.", "LoRA 目标模块名称，用逗号分隔。", { nullable: true, full: true }),
           ],
         },
         {
           id: "parallelism",
           title: "parallelism",
-          description: "Distributed layout",
+          description: { en: "Distributed layout", zh: "分布式并行布局" },
           fields: [
             field("parallelism.num_gpus", "int", "Total GPU count used by the run.", "本次运行使用的 GPU 总数。", { required: true }),
             field("parallelism.tensor_parallel_size", "int", "Tensor parallel degree.", "张量并行大小。", { default: 1 }),
@@ -161,55 +448,65 @@ import "../styles/global.css";
         {
           id: "deepspeed",
           title: "deepspeed",
-          description: "ZeRO and offload",
+          description: { en: "ZeRO and offload", zh: "ZeRO 与 offload 配置" },
           fields: [
             field("deepspeed.enabled", "bool", "Select the DeepSpeed engine in gpu-mem-calculator.", "在 gpu-mem-calculator 中选择 DeepSpeed 引擎。", { default: true }),
             field("deepspeed.zero_stage", "int", "ZeRO stage passed to both backends when enabled.", "启用时传递给两个后端的 ZeRO stage。", { default: 3, min: 0, max: 3 }),
-            field("deepspeed.offload_optimizer", "enum", "Optimizer state offload setting. Time overhead is not modeled.", "优化器状态 offload 设置。时间侧不建模 offload 额外开销。", { options: ["none", "cpu", "nvme"], default: "none" }),
-            field("deepspeed.offload_param", "enum", "Parameter offload setting. Time overhead is not modeled.", "参数 offload 设置。时间侧不建模 offload 额外开销。", { options: ["none", "cpu", "nvme"], default: "none" }),
+            field("deepspeed.offload_optimizer", "enum", "Optimizer state offload setting.", "优化器状态 offload 配置。", { options: ["none", "cpu", "nvme"], default: "none" }),
+            field("deepspeed.offload_param", "enum", "Parameter offload setting.", "参数 offload 配置。", { options: ["none", "cpu", "nvme"], default: "none" }),
           ],
         },
         {
           id: "hardware",
           title: "hardware",
-          description: "GPU and efficiency",
+          description: { en: "Hardware profile and efficiency", zh: "硬件 profile 与效率假设" },
           fields: [
-            field("hardware.profile", "string", "Hardware profile name. Also used as llm-analysis GPU lookup fallback.", "硬件 profile 名称，也作为 llm-analysis GPU 查找的 fallback。", { required: true }),
-            field("hardware.gpu_type", "string", "Human-readable GPU type, such as H100-80G or A100-80G.", "GPU 类型，例如 H100-80G 或 A100-80G。", { required: true }),
+            field("hardware.profile", "string", "Hardware profile name. Also used as fallback for llm-analysis GPU lookup.", "硬件 profile 名称。也会作为 llm-analysis GPU 查找的兜底值。", { required: true }),
+            field("hardware.gpu_type", "string", "Human-readable GPU type, such as H100-80G or A100-80G.", "人类可读的 GPU 类型，例如 H100-80G 或 A100-80G。", { required: true }),
             field("hardware.gpu_count", "int", "Total GPU count. Must equal parallelism.num_gpus.", "GPU 总数，必须等于 parallelism.num_gpus。", { required: true }),
-            field("hardware.gpu_memory_gb", "float", "Memory per GPU in GB.", "每张 GPU 显存，单位 GB。", { required: true }),
-            field("hardware.flops_efficiency", "float", "Achieved FLOPS efficiency passed to llm-analysis.", "传递给 llm-analysis 的 FLOPS 效率。", { default: 1, min: 0, max: 1 }),
-            field("hardware.memory_efficiency", "float", "HBM memory efficiency passed to llm-analysis.", "传递给 llm-analysis 的 HBM memory efficiency。", { default: 1, min: 0, max: 1 }),
+            field("hardware.gpu_memory_gb", "float", "Memory per GPU in GB.", "单卡显存，单位 GB。", { required: true }),
+            field("hardware.flops_efficiency", "float", "Achieved FLOPS efficiency passed to llm-analysis.", "传递给 llm-analysis 的 FLOPS 效率。", { default: 1.0, min: 0 }),
+            field("hardware.memory_efficiency", "float", "HBM memory efficiency passed to llm-analysis.", "传递给 llm-analysis 的 HBM 显存效率。", { default: 1.0, min: 0 }),
           ],
         },
         {
           id: "cost",
           title: "cost",
-          description: "Rental price profile",
+          description: { en: "Cost profile selection", zh: "成本 profile 选择" },
           fields: [
-            field("cost.price_profile", "string", "Must exist in price YAML hardware_prices.", "必须存在于价格配置 hardware_prices 中。", { required: true }),
-            field("price.currency", "string", "Currency label used in reports.", "报告中显示的货币单位。", { default: "CNY" }),
-            field("price.hours_per_month", "float", "Divisor for converting monthly rental to hourly cluster cost.", "用于把月租换算为小时成本的月小时数。", { default: 720 }),
-            field("price.profile_name", "string", "Price profile key. Usually matches cost.price_profile.", "价格 profile 的 key，通常与 cost.price_profile 一致。", { required: true }),
-            field("price.gpu_type", "string", "Human-readable GPU type for the price profile.", "价格 profile 对应的 GPU 类型。", { required: true }),
-            field("price.gpu_count", "int", "Number of GPUs covered by this monthly rental price.", "该月租价格覆盖的 GPU 数量。", { required: true }),
-            field("price.monthly_rental_cost", "float", "Monthly rental cost for this profile.", "该 profile 的月租成本。", { required: true }),
+            field("cost.price_profile", "string", "Price profile key used for rental cost lookup.", "用于租赁成本查询的 price profile 键。", { required: true }),
           ],
         },
         {
-          id: "analysis",
-          title: "analysis",
-          description: "LLM summary",
+          id: "price",
+          title: "price",
+          description: { en: "Editable price book override for the current profile", zh: "当前 profile 可编辑的价格覆盖项" },
           fields: [
-            field("ui.provider", "enum", "Provider for the Markdown summary. Auto follows local config and available keys.", "Markdown 总结使用的模型供应商。auto 会根据本地配置和可用 key 选择。", { options: ["auto", "openai", "deepseek"], default: "auto" }),
-            field("ui.summarize", "bool", "Generate a Markdown analysis after estimation.", "估算完成后生成 Markdown 分析。", { default: true }),
+            field("price.profile_name", "string", "Price profile name to override in the request-local price book.", "在当前请求价格表中要覆盖的 price profile 名称。", { required: true }),
+            field("price.currency", "string", "Currency label used in cost display.", "成本展示使用的货币标签。", { default: "CNY" }),
+            field("price.hours_per_month", "float", "Hours per month used to convert monthly rental cost to hourly cost.", "把月租成本换算为小时成本时使用的每月小时数。", { default: 720 }),
+            field("price.gpu_type", "string", "GPU type stored in the request-local price book.", "写入当前请求价格表的 GPU 类型。", { required: true }),
+            field("price.gpu_count", "int", "GPU count stored in the request-local price book.", "写入当前请求价格表的 GPU 数量。", { required: true }),
+            field("price.monthly_rental_cost", "float", "Monthly rental cost for this price profile.", "这个 price profile 的月租成本。", { required: true, min: 0 }),
+          ],
+        },
+        {
+          id: "ui",
+          title: "ui",
+          description: { en: "Summary settings", zh: "总结分析设置" },
+          fields: [
+            field("ui.summarize", "bool", "Call OpenAI or DeepSeek for a short Markdown summary after the estimator returns.", "在估算结果返回后，调用 OpenAI 或 DeepSeek 生成 Markdown 简短总结。", { default: true }),
+            field("ui.provider", "enum", "Summary LLM provider. Auto follows local config and available keys.", "总结分析的 LLM 提供方。Auto 会跟随本地配置和可用 key。", { options: ["auto", "openai", "deepseek"], default: "auto" }),
           ],
         },
       ];
 
       const example = {
         version: "0.1",
-        run: { name: "qwen_7b_full_h100_zero3", description: "qwen-like dense full fine-tuning on H100 x8" },
+        run: {
+          name: "qwen_7b_full_h100_zero3",
+          description: "qwen-like dense full fine-tuning on H100 x8",
+        },
         model: {
           name: "qwen-7b-like",
           architecture: "dense",
@@ -220,7 +517,11 @@ import "../styles/global.css";
           num_attention_heads: 32,
           vocab_size: 152064,
           seq_len: 4096,
-          moe: { num_experts: null, experts_per_token: null, expert_parallel_size: 1 },
+          moe: {
+            num_experts: null,
+            experts_per_token: null,
+            expert_parallel_size: 1,
+          },
         },
         training: {
           mode: "full",
@@ -233,312 +534,97 @@ import "../styles/global.css";
           total_tokens_b: 1,
           activation_checkpointing: 1,
         },
-        peft: { enabled: false, method: null, trainable_params_b: null, lora_rank: null, lora_alpha: null, target_modules: null },
-        parallelism: { num_gpus: 8, tensor_parallel_size: 1, pipeline_parallel_size: 1, data_parallel_size: 8, expert_parallel_size: 1, sequence_parallel: false },
-        deepspeed: { enabled: true, zero_stage: 3, offload_optimizer: "none", offload_param: "none" },
-        hardware: { profile: "h100_80g_8gpu", gpu_type: "H100-80G", gpu_count: 8, gpu_memory_gb: 80, flops_efficiency: 0.35, memory_efficiency: 0.9 },
-        cost: { price_profile: "h100_80g_8gpu" },
-        price: { currency: "CNY", hours_per_month: 720, profile_name: "h100_80g_8gpu", gpu_type: "H100-80G", gpu_count: 8, monthly_rental_cost: 45000 },
-        ui: { provider: "auto", summarize: true },
+        peft: {
+          enabled: false,
+          method: null,
+          trainable_params_b: null,
+          lora_rank: null,
+          lora_alpha: null,
+          target_modules: null,
+        },
+        parallelism: {
+          num_gpus: 8,
+          tensor_parallel_size: 1,
+          pipeline_parallel_size: 1,
+          data_parallel_size: 8,
+          expert_parallel_size: 1,
+          sequence_parallel: false,
+        },
+        deepspeed: {
+          enabled: true,
+          zero_stage: 3,
+          offload_optimizer: "none",
+          offload_param: "none",
+        },
+        hardware: {
+          profile: "h100_80g_8gpu",
+          gpu_type: "H100-80G",
+          gpu_count: 8,
+          gpu_memory_gb: 80,
+          flops_efficiency: 0.35,
+          memory_efficiency: 0.9,
+        },
+        cost: {
+          price_profile: "h100_80g_8gpu",
+        },
+        price: {
+          profile_name: "h100_80g_8gpu",
+          currency: "CNY",
+          hours_per_month: 720,
+          gpu_type: "H100-80G",
+          gpu_count: 8,
+          monthly_rental_cost: 45000,
+        },
+        ui: {
+          summarize: true,
+          provider: "deepseek",
+        },
       };
 
-      function getPath(obj, path) {
-        return path.split(".").reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
-      }
-
-      function setPath(obj, path, value) {
-        const parts = path.split(".");
-        let target = obj;
-        for (const part of parts.slice(0, -1)) {
-          target[part] ??= {};
-          target = target[part];
-        }
-        target[parts.at(-1)] = value;
+      function ui() {
+        return text[language];
       }
 
       function allFields() {
         return schema.flatMap((section) => section.fields);
       }
 
-      function renderForm() {
-        const form = document.getElementById("configForm");
-        form.innerHTML = "";
-        for (const section of schema) {
-          const details = document.createElement("details");
-          details.className = "section";
-          details.open = true;
-          details.innerHTML = `<summary>${section.title}<span>${section.description}</span></summary><div class="fields"></div>`;
-          const fields = details.querySelector(".fields");
-          for (const spec of section.fields) {
-            fields.appendChild(renderField(spec));
-          }
-          form.appendChild(details);
-        }
-        loadValues(example);
+      function getPath(obj, path) {
+        return path.split(".").reduce((value, key) => (value == null ? undefined : value[key]), obj);
       }
 
-      function renderField(spec) {
-        const wrapper = document.createElement("div");
-        wrapper.className = `field ${spec.full ? "full" : ""}`;
-        wrapper.dataset.path = spec.path;
-        wrapper.innerHTML = `
-          <div class="meaning" data-meaning>${spec.meaning[language]}</div>
-          <div class="label-row">
-            <label for="${spec.path}">${spec.path}</label>
-            <span class="type">${spec.type}${spec.required ? " · required" : ""}</span>
-          </div>
-        `;
-
-        let input;
-        if (spec.type === "enum") {
-          input = document.createElement("select");
-          input.innerHTML = `<option value=""></option>${spec.options.map((option) => `<option value="${option}">${option}</option>`).join("")}`;
-        } else if (spec.type === "bool") {
-          input = document.createElement("label");
-          input.className = "checkbox";
-          input.innerHTML = `<input id="${spec.path}" data-input type="checkbox" /> enabled`;
-          wrapper.appendChild(input);
-          wrapper.insertAdjacentHTML("beforeend", `<div class="error"></div>`);
-          input.querySelector("input").addEventListener("input", () => validateField(wrapper));
-          return wrapper;
-        } else if (spec.multiline) {
-          input = document.createElement("textarea");
-        } else {
-          input = document.createElement("input");
-          input.type = spec.type === "int" || spec.type === "float" ? "number" : "text";
-          if (spec.type === "int") input.step = "1";
-          if (spec.type === "float") input.step = "any";
-          if (spec.min !== undefined) input.min = String(spec.min);
-          if (spec.max !== undefined) input.max = String(spec.max);
+      function setPath(obj, path, value) {
+        const parts = path.split(".");
+        let cursor = obj;
+        while (parts.length > 1) {
+          const part = parts.shift();
+          cursor[part] ??= {};
+          cursor = cursor[part];
         }
-
-        input.id = spec.path;
-        input.dataset.input = "true";
-        input.addEventListener("input", () => validateField(wrapper));
-        wrapper.appendChild(input);
-        wrapper.insertAdjacentHTML("beforeend", `<div class="error"></div>`);
-        return wrapper;
+        cursor[parts[0]] = value;
       }
 
-      function updateMeanings() {
-        for (const spec of allFields()) {
-          const wrapper = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"]`);
-          if (wrapper) {
-            wrapper.querySelector("[data-meaning]").textContent = spec.meaning[language];
-          }
-        }
-        document.getElementById("languageToggle").textContent = language === "en" ? "Meaning: English" : "提示：中文";
+      function findField(path) {
+        return allFields().find((item) => item.path === path);
       }
 
-      function loadValues(values) {
-        for (const spec of allFields()) {
-          const input = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"] [data-input]`);
-          if (!input) continue;
-          const value = getPath(values, spec.path);
-          if (spec.type === "bool") {
-            input.checked = Boolean(value);
-          } else {
-            input.value = value == null ? "" : Array.isArray(value) ? value.join(", ") : String(value);
-          }
-          validateField(input.closest(".field"));
-        }
+      function findInput(path) {
+        return document.querySelector(`.field[data-path="${CSS.escape(path)}"] [data-input]`);
       }
 
-      function clearValues() {
-        for (const wrapper of document.querySelectorAll(".field")) {
-          const input = wrapper.querySelector("[data-input]");
-          if (!input) continue;
-          if (input.type === "checkbox") {
-            input.checked = false;
-          } else {
-            input.value = "";
-          }
-          validateField(wrapper);
-        }
-      }
-
-      function parseField(spec, input) {
-        if (spec.type === "bool") return input.checked;
-        const raw = input.value.trim();
-        if (raw === "") {
-          if (spec.nullable) return null;
-          return undefined;
-        }
-        if (spec.type === "int") {
-          const value = Number(raw);
-          if (!Number.isInteger(value)) throw new Error("Must be an integer.");
-          return value;
-        }
-        if (spec.type === "float") {
-          const value = Number(raw);
-          if (!Number.isFinite(value)) throw new Error("Must be a number.");
-          return value;
-        }
-        if (spec.type === "string_list") {
-          return raw.split(",").map((item) => item.trim()).filter(Boolean);
-        }
-        return raw;
-      }
-
-      function validateField(wrapper, forSubmit = false) {
-        const spec = allFields().find((item) => item.path === wrapper.dataset.path);
-        const input = wrapper.querySelector("[data-input]");
-        const error = wrapper.querySelector(".error");
-        wrapper.classList.remove("invalid");
-        error.textContent = "";
-        try {
-          const value = parseField(spec, input);
-          if (forSubmit && spec.required && (value === undefined || value === null || value === "")) {
-            throw new Error("Required for estimate.");
-          }
-          if ((spec.type === "int" || spec.type === "float") && value !== undefined && value !== null) {
-            if (spec.min !== undefined && value < spec.min) throw new Error(`Must be >= ${spec.min}.`);
-            if (spec.max !== undefined && value > spec.max) throw new Error(`Must be <= ${spec.max}.`);
-          }
-          return true;
-        } catch (err) {
-          wrapper.classList.add("invalid");
-          error.textContent = err.message;
-          return false;
-        }
-      }
-
-      function collectPayload() {
-        let valid = true;
-        const data = {};
-        for (const spec of allFields()) {
-          const wrapper = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"]`);
-          const input = wrapper.querySelector("[data-input]");
-          valid = validateField(wrapper, true) && valid;
-          if (!valid && wrapper.classList.contains("invalid")) continue;
-          const value = parseField(spec, input);
-          if (value !== undefined) setPath(data, spec.path, value);
-        }
-        if (!valid) throw new Error("Please fix highlighted fields first.");
-
-        const config = structuredClone(data);
-        const price = config.price || {};
-        const ui = config.ui || {};
-        delete config.price;
-        delete config.ui;
-
-        if (!config.cost?.price_profile && price.profile_name) {
-          config.cost ??= {};
-          config.cost.price_profile = price.profile_name;
-        }
-
-        const profileName = price.profile_name || config.cost?.price_profile || "custom";
-        const prices = {
-          currency: price.currency || "CNY",
-          hours_per_month: price.hours_per_month || 720,
-          hardware_prices: {
-            [profileName]: {
-              gpu_type: price.gpu_type,
-              gpu_count: price.gpu_count,
-              monthly_rental_cost: price.monthly_rental_cost,
-            },
-          },
-        };
-
-        return {
-          config,
-          prices,
-          summarize: Boolean(ui.summarize),
-          provider: ui.provider || "auto",
-        };
-      }
-
-      function showStatus(message, hidden = false) {
-        const status = document.getElementById("status");
-        status.hidden = hidden;
-        status.textContent = message;
+      function formatNumber(value, digits = 2) {
+        if (value == null || !Number.isFinite(Number(value))) return "n/a";
+        return Number(value).toFixed(digits);
       }
 
       function escapeHtml(value) {
-        return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
-      }
-
-      function metric(label, value, className = "") {
-        return `<div class="metric"><span>${label}</span><strong class="${className}">${escapeHtml(value ?? "n/a")}</strong></div>`;
-      }
-
-      function setProgressStep(validation, estimate, summary, display) {
-        document.getElementById("progressSteps").innerHTML = [
-          metric("Validation", validation),
-          metric("Estimate", estimate),
-          metric("Summary", summary),
-          metric("Display", display),
-        ].join("");
-      }
-
-      function setProgress(percent, stage, etaText) {
-        currentProgressPercent = percent;
-        document.getElementById("progressFill").style.width = `${percent}%`;
-        document.getElementById("progressStage").textContent = stage;
-        document.getElementById("progressEta").textContent = etaText;
-      }
-
-      function startProgressAnimation(targetPercent, stage, totalSeconds) {
-        clearInterval(progressTimer);
-        const startPercent = currentProgressPercent;
-        const startedAt = Date.now();
-        progressTimer = setInterval(() => {
-          const elapsed = (Date.now() - startedAt) / 1000;
-          const ratio = Math.min(elapsed / totalSeconds, 1);
-          const nextPercent = startPercent + (targetPercent - startPercent) * ratio;
-          const remaining = Math.max(totalSeconds - elapsed, 0);
-          setProgress(nextPercent, stage, `Estimated time left: ${remaining.toFixed(0)}s`);
-          if (ratio >= 1) {
-            clearInterval(progressTimer);
-          }
-        }, 150);
-      }
-
-      function stopProgressAnimation() {
-        clearInterval(progressTimer);
-        progressTimer = null;
-      }
-
-      function renderResult(data) {
-        const result = data.result;
-        const memory = result.memory || {};
-        const time = result.time || {};
-        const cost = result.cost || {};
-        const gpuCount = result?.time?.raw_output?.total_num_gpus || result?.memory?.raw_output?.total_memory_all_gpus_gb && result?.memory?.memory_per_gpu_gb ? Math.round(result.memory.raw_output.total_memory_all_gpus_gb / result.memory.memory_per_gpu_gb) : null;
-
-        const runnableClass = result.runnable ? "status-ok" : "status-danger";
-        const riskClass = result.risk_level === "low" ? "status-ok" : result.risk_level === "medium" ? "status-warn" : "status-danger";
-
-        document.getElementById("metrics").innerHTML = [
-          metric("Runnable", String(result.runnable), runnableClass),
-          metric("Risk level", result.risk_level, riskClass),
-          metric(
-            "Avg memory / GPU",
-            memory.memory_per_gpu_gb == null ? "n/a" : `${memory.memory_per_gpu_gb.toFixed(2)} / ${memory.gpu_memory_limit_gb.toFixed(0)} GB`
-          ),
-          metric("Utilization", memory.memory_utilization == null ? "n/a" : `${(memory.memory_utilization * 100).toFixed(1)}%`),
-          metric("Time", time.total_time_hours == null ? "n/a" : `${time.total_time_hours.toFixed(2)} h`),
-          metric("GPU-hours", time.gpu_hours == null ? "n/a" : time.gpu_hours.toFixed(2)),
-          metric("Cost", cost.estimated_cost == null ? "n/a" : `${cost.estimated_cost.toFixed(2)} ${cost.currency}`),
-          metric("Summary provider", data.summary_provider || "pending"),
-        ].join("");
-
-        document.getElementById("memoryNote").textContent =
-          gpuCount && memory.memory_per_gpu_gb != null
-            ? `Memory is shown as average per GPU for ${gpuCount} GPUs, compared against the per-GPU limit.`
-            : "Memory is shown as average per GPU, compared against the per-GPU limit.";
-
-        document.getElementById("rawResult").textContent = JSON.stringify(result, null, 2);
-      }
-
-      function renderSummary(data) {
-        if (data.summary_markdown) {
-          document.getElementById("summary").innerHTML = renderMarkdown(data.summary_markdown);
-        } else if (data.summary_error) {
-          document.getElementById("summary").innerHTML = `<p><strong>Summary unavailable.</strong></p><p>${escapeHtml(data.summary_error)}</p>`;
-        } else {
-          document.getElementById("summary").textContent = "No summary requested.";
-        }
+        return String(value).replace(/[&<>"']/g, (char) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        }[char]));
       }
 
       function renderMarkdown(markdown) {
@@ -590,17 +676,647 @@ import "../styles/global.css";
         return html;
       }
 
-      function inlineMarkdown(text) {
-        return escapeHtml(text)
+      function inlineMarkdown(textValue) {
+        return escapeHtml(textValue)
           .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
           .replace(/`([^`]+)`/g, "<code>$1</code>");
       }
 
+      function metric(label, value, className = "") {
+        return `<div class="metric"><span>${escapeHtml(label)}</span><strong class="${className}">${escapeHtml(value ?? "n/a")}</strong></div>`;
+      }
+
+      function setInputValue(path, value) {
+        const input = findInput(path);
+        if (!input) return;
+        const spec = findField(path);
+        if (spec?.type === "bool") {
+          input.checked = Boolean(value);
+        } else if (value == null) {
+          input.value = "";
+        } else if (Array.isArray(value)) {
+          input.value = value.join(", ");
+        } else {
+          input.value = String(value);
+        }
+        validateField(input.closest(".field"));
+      }
+
+      function readFieldValue(path) {
+        const input = findInput(path);
+        const spec = findField(path);
+        if (!input || !spec) return undefined;
+        return parseField(spec, input);
+      }
+
+      function populateHardwareSelectors() {
+        const presetSelect = document.getElementById("hardwarePreset");
+        const compareOptions = document.getElementById("compareOptions");
+        if (!presetSelect || !compareOptions) return;
+
+        if (!hardwareOptions.length) {
+          presetSelect.innerHTML = `<option value="">${escapeHtml(ui().comparison.loading)}</option>`;
+          compareOptions.innerHTML = `<div class="helper">${escapeHtml(ui().comparison.noOptions)}</div>`;
+          return;
+        }
+
+        const currentProfile = String(readFieldValue("hardware.profile") || "");
+        const selectedProfiles = new Set(getSelectedCompareProfiles());
+        if (!selectedProfiles.size && currentProfile) selectedProfiles.add(currentProfile);
+        presetSelect.innerHTML = [
+          `<option value="">${escapeHtml(ui().comparison.presetEmpty)}</option>`,
+          ...hardwareOptions.map((option) => {
+            const label = `${option.gpu_type} x${option.gpu_count} (${option.profile})`;
+            const selected = option.profile === currentProfile ? " selected" : "";
+            return `<option value="${escapeHtml(option.profile)}"${selected}>${escapeHtml(label)}</option>`;
+          }),
+        ].join("");
+
+        compareOptions.innerHTML = hardwareOptions
+          .map((option) => {
+            const checked = selectedProfiles.has(option.profile) ? " checked" : "";
+            const label = `${option.gpu_type} x${option.gpu_count}`;
+            return `
+              <label class="compare-chip">
+                <input type="checkbox" value="${escapeHtml(option.profile)}"${checked} />
+                <span>${escapeHtml(label)}</span>
+              </label>
+            `;
+          })
+          .join("");
+      }
+
+      function renderHardwareControls(fieldsContainer) {
+        const block = document.createElement("div");
+        block.className = "preset-stack";
+        block.innerHTML = `
+          <div class="field full special-field">
+            <div class="meaning" id="hardwarePresetMeaning">${ui().comparison.presetMeaning}</div>
+            <div class="label-row">
+              <label for="hardwarePreset">${ui().comparison.presetLabel}</label>
+              <span class="type" id="hardwarePresetType">${ui().comparison.presetType}</span>
+            </div>
+            <select id="hardwarePreset"></select>
+          </div>
+          <div class="field full special-field">
+            <div class="meaning" id="compareMeaning">${ui().comparison.compareMeaning}</div>
+            <div class="label-row">
+              <label>${ui().comparison.compareLabel}</label>
+              <span class="type" id="compareType">${ui().comparison.compareType}</span>
+            </div>
+            <div id="compareOptions" class="compare-options">
+              <div class="helper">${escapeHtml(ui().comparison.loading)}</div>
+            </div>
+          </div>
+        `;
+        fieldsContainer.prepend(block);
+
+        block.querySelector("#hardwarePreset").addEventListener("change", (event) => {
+          const profile = event.target.value;
+          if (!profile) return;
+          applyHardwarePreset(profile);
+        });
+      }
+
+      function makeField(spec) {
+        const wrapper = document.createElement("div");
+        wrapper.className = `field${spec.full || spec.multiline ? " full" : ""}`;
+        wrapper.dataset.path = spec.path;
+
+        wrapper.innerHTML = `
+          <div class="meaning" data-meaning>${escapeHtml(spec.meaning[language])}</div>
+          <div class="label-row">
+            <label for="${escapeHtml(spec.path)}">${escapeHtml(spec.path)}</label>
+            <span class="type">${escapeHtml(spec.type)}${spec.required ? ` · ${escapeHtml(ui().fieldMetaRequired)}` : ""}</span>
+          </div>
+        `;
+
+        let input;
+        if (spec.type === "enum") {
+          input = document.createElement("select");
+          input.innerHTML = `<option value=""></option>${(spec.options || []).map((option) => `<option value="${escapeHtml(option)}">${escapeHtml(option)}</option>`).join("")}`;
+        } else if (spec.type === "bool") {
+          input = document.createElement("label");
+          input.className = "checkbox";
+          input.innerHTML = `<input id="${escapeHtml(spec.path)}" data-input type="checkbox" /> <span>${escapeHtml(ui().checkboxEnabled)}</span>`;
+          wrapper.appendChild(input);
+          wrapper.insertAdjacentHTML("beforeend", `<div class="error"></div>`);
+          input.querySelector("input").addEventListener("input", () => validateField(wrapper));
+          return wrapper;
+        } else if (spec.multiline) {
+          input = document.createElement("textarea");
+        } else {
+          input = document.createElement("input");
+          input.type = spec.type === "int" || spec.type === "float" ? "number" : "text";
+          if (spec.type === "int") input.step = "1";
+          if (spec.type === "float") input.step = "any";
+          if (spec.min !== undefined) input.min = String(spec.min);
+          if (spec.max !== undefined) input.max = String(spec.max);
+        }
+
+        input.id = spec.path;
+        input.dataset.input = "true";
+        if (spec.default !== undefined && spec.type !== "bool") {
+          input.value = String(spec.default);
+        }
+        input.addEventListener("input", () => {
+          validateField(wrapper);
+          if (spec.path === "hardware.profile") populateHardwareSelectors();
+        });
+        wrapper.appendChild(input);
+        wrapper.insertAdjacentHTML("beforeend", `<div class="error"></div>`);
+        return wrapper;
+      }
+
+      function renderForm() {
+        const form = document.getElementById("configForm");
+        form.innerHTML = "";
+
+        for (const [index, section] of schema.entries()) {
+          const details = document.createElement("details");
+          details.className = "section";
+          details.open = index < 3;
+          details.dataset.sectionId = section.id;
+          details.innerHTML = `
+            <summary>
+              <strong>${escapeHtml(section.title)}</strong>
+              <span data-section-description>${escapeHtml(section.description[language])}</span>
+            </summary>
+          `;
+
+          const fieldsContainer = document.createElement("div");
+          fieldsContainer.className = "fields";
+          if (section.id === "hardware") {
+            renderHardwareControls(fieldsContainer);
+          }
+          for (const spec of section.fields) {
+            fieldsContainer.appendChild(makeField(spec));
+          }
+          details.appendChild(fieldsContainer);
+          form.appendChild(details);
+        }
+
+        applyDefaultValues();
+      }
+
+      function applyDefaultValues() {
+        for (const spec of allFields()) {
+          if (spec.default !== undefined) {
+            setInputValue(spec.path, spec.default);
+          }
+        }
+        setProgressStep("waiting", "waiting", "waiting", "waiting", "waiting");
+      }
+
+      function updateStaticTexts() {
+        document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+        document.getElementById("appTitle").textContent = ui().appTitle;
+        document.getElementById("appDescription").textContent = ui().appDescription;
+        document.getElementById("languageToggle").textContent = ui().languageToggle;
+        document.getElementById("loadExample").textContent = ui().loadExample;
+        document.getElementById("clearForm").textContent = ui().clearForm;
+        document.getElementById("estimateButton").textContent = ui().estimateButton;
+        document.getElementById("progressTitle").textContent = ui().progressTitle;
+        document.getElementById("resultTitle").textContent = ui().resultTitle;
+        document.getElementById("comparisonTitle").textContent = ui().comparisonTitle;
+        document.getElementById("comparisonHelper").textContent = ui().comparisonHelper;
+        document.getElementById("summaryTitle").textContent = ui().summaryTitle;
+        document.getElementById("rawResultTitle").textContent = ui().rawResultTitle;
+      }
+
+      function updateFieldCopy() {
+        document.querySelectorAll("[data-section-description]").forEach((element, index) => {
+          element.textContent = schema[index].description[language];
+        });
+
+        for (const spec of allFields()) {
+          const wrapper = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"]`);
+          if (!wrapper) continue;
+          wrapper.querySelector("[data-meaning]").textContent = spec.meaning[language];
+          wrapper.querySelector(".type").textContent = `${spec.type}${spec.required ? ` · ${ui().fieldMetaRequired}` : ""}`;
+          const checkboxText = wrapper.querySelector(".checkbox span");
+          if (checkboxText) checkboxText.textContent = ui().checkboxEnabled;
+        }
+
+        const hardwarePresetMeaning = document.getElementById("hardwarePresetMeaning");
+        const hardwarePresetType = document.getElementById("hardwarePresetType");
+        const compareMeaning = document.getElementById("compareMeaning");
+        const compareType = document.getElementById("compareType");
+        if (hardwarePresetMeaning) hardwarePresetMeaning.textContent = ui().comparison.presetMeaning;
+        if (hardwarePresetType) hardwarePresetType.textContent = ui().comparison.presetType;
+        if (compareMeaning) compareMeaning.textContent = ui().comparison.compareMeaning;
+        if (compareType) compareType.textContent = ui().comparison.compareType;
+        populateHardwareSelectors();
+      }
+
+      function loadValues(values) {
+        for (const spec of allFields()) {
+          const value = getPath(values, spec.path);
+          if (value !== undefined) {
+            setInputValue(spec.path, value);
+          } else {
+            setInputValue(spec.path, spec.default ?? (spec.type === "bool" ? false : ""));
+          }
+        }
+        populateHardwareSelectors();
+      }
+
+      function clearValues() {
+        for (const wrapper of document.querySelectorAll(".field[data-path]")) {
+          const spec = findField(wrapper.dataset.path);
+          if (!spec) continue;
+          const input = wrapper.querySelector("[data-input]");
+          if (!input) continue;
+          if (spec.type === "bool") input.checked = Boolean(spec.default);
+          else if (spec.default !== undefined) input.value = String(spec.default);
+          else input.value = "";
+          validateField(wrapper);
+        }
+        latestCompareData = null;
+        populateHardwareSelectors();
+      }
+
+      function parseField(spec, input) {
+        if (spec.type === "bool") return input.checked;
+        const raw = String(input.value || "").trim();
+        if (raw === "") {
+          if (spec.nullable) return null;
+          return undefined;
+        }
+        if (spec.type === "int") {
+          const value = Number(raw);
+          if (!Number.isInteger(value)) throw new Error(ui().errors.integer);
+          return value;
+        }
+        if (spec.type === "float") {
+          const value = Number(raw);
+          if (!Number.isFinite(value)) throw new Error(ui().errors.number);
+          return value;
+        }
+        if (spec.type === "string_list") {
+          return raw.split(",").map((item) => item.trim()).filter(Boolean);
+        }
+        return raw;
+      }
+
+      function validateField(wrapper, forSubmit = false) {
+        const spec = findField(wrapper.dataset.path);
+        const input = wrapper.querySelector("[data-input]");
+        const error = wrapper.querySelector(".error");
+        wrapper.classList.remove("invalid");
+        error.textContent = "";
+        try {
+          const value = parseField(spec, input);
+          if (forSubmit && spec.required && (value === undefined || value === null || value === "")) {
+            throw new Error(ui().errors.required);
+          }
+          if ((spec.type === "int" || spec.type === "float") && value !== undefined && value !== null) {
+            if (spec.min !== undefined && value < spec.min) throw new Error(ui().errors.min(spec.min));
+            if (spec.max !== undefined && value > spec.max) throw new Error(ui().errors.max(spec.max));
+          }
+          return true;
+        } catch (errorValue) {
+          wrapper.classList.add("invalid");
+          error.textContent = errorValue.message;
+          return false;
+        }
+      }
+
+      function getSelectedCompareProfiles() {
+        return Array.from(document.querySelectorAll("#compareOptions input[type='checkbox']:checked")).map((input) => input.value);
+      }
+
+      function buildPricesPayload(price, baseProfile) {
+        const hardwarePrices = {};
+        for (const option of hardwareOptions) {
+          hardwarePrices[option.profile] = {
+            gpu_type: option.gpu_type,
+            gpu_count: option.gpu_count,
+            monthly_rental_cost: option.monthly_rental_cost,
+          };
+        }
+
+        const profileName = price.profile_name || baseProfile || "custom";
+        hardwarePrices[profileName] = {
+          gpu_type: price.gpu_type,
+          gpu_count: price.gpu_count,
+          monthly_rental_cost: price.monthly_rental_cost,
+        };
+
+        return {
+          currency: price.currency || "CNY",
+          hours_per_month: price.hours_per_month || 720,
+          hardware_prices: hardwarePrices,
+        };
+      }
+
+      function collectPayload() {
+        let valid = true;
+        const data = {};
+
+        for (const spec of allFields()) {
+          const wrapper = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"]`);
+          valid = validateField(wrapper, true) && valid;
+          if (!valid && wrapper.classList.contains("invalid")) continue;
+          const value = parseField(spec, wrapper.querySelector("[data-input]"));
+          if (value !== undefined) setPath(data, spec.path, value);
+        }
+
+        if (!valid) throw new Error(ui().errors.fixFields);
+
+        const config = structuredClone(data);
+        const price = config.price || {};
+        const uiConfig = config.ui || {};
+        delete config.price;
+        delete config.ui;
+
+        if (!config.cost?.price_profile && price.profile_name) {
+          config.cost ??= {};
+          config.cost.price_profile = price.profile_name;
+        }
+
+        const baseProfile = config.cost?.price_profile || config.hardware?.profile || price.profile_name || "custom";
+        const compareProfiles = Array.from(new Set([baseProfile, ...getSelectedCompareProfiles()])).filter(Boolean);
+
+        return {
+          config,
+          prices: buildPricesPayload(price, baseProfile),
+          summarize: Boolean(uiConfig.summarize),
+          provider: uiConfig.provider || "auto",
+          language,
+          compareProfiles,
+        };
+      }
+
+      function showStatus(message, hidden = false) {
+        const status = document.getElementById("status");
+        status.hidden = hidden;
+        status.textContent = message;
+      }
+
+      function setProgressStep(validation, estimate, compare, summary, display) {
+        progressState.steps = [validation, estimate, compare, summary, display];
+        const labels = ui().progressLabels;
+        document.getElementById("progressSteps").innerHTML = [
+          metric(labels[0], ui().progressStates[validation] || validation),
+          metric(labels[1], ui().progressStates[estimate] || estimate),
+          metric(labels[2], ui().progressStates[compare] || compare),
+          metric(labels[3], ui().progressStates[summary] || summary),
+          metric(labels[4], ui().progressStates[display] || display),
+        ].join("");
+      }
+
+      function resolveEtaText() {
+        if (progressState.etaMode === "left") return ui().eta.left(progressState.etaValue);
+        if (progressState.etaMode === "compare") return ui().eta.compare;
+        if (progressState.etaMode === "summary") return ui().eta.summary;
+        if (progressState.etaMode === "ready") return ui().eta.ready;
+        return ui().eta.unknown;
+      }
+
+      function setProgress(percent, stageKey, etaMode = "unknown", etaValue = 0) {
+        currentProgressPercent = percent;
+        progressState.stageKey = stageKey;
+        progressState.etaMode = etaMode;
+        progressState.etaValue = etaValue;
+        document.getElementById("progressFill").style.width = `${percent}%`;
+        document.getElementById("progressStage").textContent = ui().progressStages[stageKey] || stageKey;
+        document.getElementById("progressEta").textContent = resolveEtaText();
+      }
+
+      function startProgressAnimation(targetPercent, stageKey, totalSeconds, etaMode = "left") {
+        clearInterval(progressTimer);
+        const startPercent = currentProgressPercent;
+        const startedAt = Date.now();
+        progressTimer = setInterval(() => {
+          const elapsed = (Date.now() - startedAt) / 1000;
+          const ratio = Math.min(elapsed / totalSeconds, 1);
+          const nextPercent = startPercent + (targetPercent - startPercent) * ratio;
+          const remaining = Math.max(totalSeconds - elapsed, 0);
+          setProgress(nextPercent, stageKey, etaMode, Math.ceil(remaining));
+          if (ratio >= 1) clearInterval(progressTimer);
+        }, 150);
+      }
+
+      function stopProgressAnimation() {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+
+      function formatMetricValue(key, data) {
+        const result = data.result;
+        const memory = result.memory || {};
+        const time = result.time || {};
+        const cost = result.cost || {};
+        if (key === "runnable") return result.runnable ? ui().values.yes : ui().values.no;
+        if (key === "risk") return result.risk_level || "n/a";
+        if (key === "memory") {
+          if (memory.memory_per_gpu_gb == null || memory.gpu_memory_limit_gb == null) return "n/a";
+          return `${formatNumber(memory.memory_per_gpu_gb)} / ${formatNumber(memory.gpu_memory_limit_gb, 0)} GB`;
+        }
+        if (key === "utilization") {
+          if (memory.memory_utilization == null) return "n/a";
+          return `${formatNumber(memory.memory_utilization * 100, 1)}%`;
+        }
+        if (key === "time") return time.total_time_hours == null ? "n/a" : `${formatNumber(time.total_time_hours)} h`;
+        if (key === "gpuHours") return time.gpu_hours == null ? "n/a" : formatNumber(time.gpu_hours);
+        if (key === "cost") return cost.estimated_cost == null ? "n/a" : `${formatNumber(cost.estimated_cost)} ${cost.currency}`;
+        if (key === "provider") return data.summary_provider || ui().values.pending;
+        return "";
+      }
+
+      function renderResult(data) {
+        latestResult = data;
+        const result = data.result;
+        const memory = result.memory || {};
+        const gpuCount = result?.time?.raw_output?.total_num_gpus || result?.memory?.raw_output?.num_gpus || result?.memory?.raw_output?.total_num_gpus || result?.memory?.raw_output?.gpu_config?.num_gpus || result?.memory?.raw_output?.input?.gpu_config?.num_gpus || result?.memory?.raw_output?.cluster_gpus || result?.memory?.raw_output?.world_size || result?.memory?.raw_output?.gpu_count || result?.memory?.raw_output?.n_gpus || result?.memory?.raw_output?.parallelism_config?.total_gpus || readFieldValue("hardware.gpu_count");
+
+        const runnableClass = result.runnable ? "status-ok" : "status-danger";
+        const riskClass = result.risk_level === "low"
+          ? "status-ok"
+          : result.risk_level === "medium"
+            ? "status-warn"
+            : "status-danger";
+
+        document.getElementById("metrics").innerHTML = [
+          metric(ui().metrics.runnable, formatMetricValue("runnable", data), runnableClass),
+          metric(ui().metrics.risk, formatMetricValue("risk", data), riskClass),
+          metric(ui().metrics.memory, formatMetricValue("memory", data)),
+          metric(ui().metrics.utilization, formatMetricValue("utilization", data)),
+          metric(ui().metrics.time, formatMetricValue("time", data)),
+          metric(ui().metrics.gpuHours, formatMetricValue("gpuHours", data)),
+          metric(ui().metrics.cost, formatMetricValue("cost", data)),
+          metric(ui().metrics.provider, formatMetricValue("provider", data)),
+        ].join("");
+
+        document.getElementById("memoryNote").textContent =
+          gpuCount && memory.memory_per_gpu_gb != null
+            ? ui().memoryNote.withCount(gpuCount)
+            : ui().memoryNote.generic;
+
+        document.getElementById("rawResult").textContent = JSON.stringify(result, null, 2);
+      }
+
+      function renderSummary(data) {
+        if (data.summary_markdown) {
+          document.getElementById("summary").innerHTML = renderMarkdown(data.summary_markdown);
+        } else if (data.summary_error) {
+          document.getElementById("summary").innerHTML =
+            `<p><strong>${escapeHtml(ui().summary.unavailableTitle)}</strong></p><p>${escapeHtml(data.summary_error)}</p>`;
+        } else {
+          document.getElementById("summary").textContent = ui().values.noSummaryRequested;
+        }
+      }
+
+      function formatDelta(value, unit, baseValue) {
+        if (value == null || baseValue == null || !Number.isFinite(value) || !Number.isFinite(baseValue)) return "n/a";
+        if (Math.abs(value - baseValue) < 0.005) return `0.00 ${unit}`;
+        const delta = value - baseValue;
+        return `${delta > 0 ? "+" : ""}${formatNumber(delta)} ${unit}`;
+      }
+
+      function renderComparison(compareData) {
+        latestCompareData = compareData;
+        const container = document.getElementById("comparison");
+        const insights = document.getElementById("comparisonInsights");
+        const baseProfile = latestResult?.result?.cost?.price_profile || readFieldValue("cost.price_profile");
+        const baseTime = latestResult?.result?.time?.total_time_hours ?? null;
+        const baseCost = latestResult?.result?.cost?.estimated_cost ?? null;
+
+        if (!compareData?.items?.length) {
+          container.innerHTML = `<div class="helper">${escapeHtml(ui().comparison.placeholder)}</div>`;
+          insights.textContent = "";
+          return;
+        }
+
+        const columns = ui().comparison.columns;
+        const rows = compareData.items.map((item) => {
+          if (item.error || !item.result) {
+            return `
+              <tr>
+                <td>${escapeHtml(item.profile || "unknown")}</td>
+                <td>${escapeHtml(item.gpu_type || ui().values.unavailable)}</td>
+                <td>${escapeHtml(String(item.gpu_count ?? "n/a"))}</td>
+                <td>n/a</td>
+                <td>n/a</td>
+                <td>n/a</td>
+                <td>n/a</td>
+                <td>n/a</td>
+                <td>${escapeHtml(ui().values.no)}</td>
+                <td>${escapeHtml(ui().values.unavailable)}</td>
+                <td>${escapeHtml(item.error)}</td>
+              </tr>
+            `;
+          }
+
+          const result = item.result;
+          const memory = result.memory || {};
+          const time = result.time || {};
+          const cost = result.cost || {};
+          const currentBadge = item.profile === baseProfile ? ` <span class="badge">${escapeHtml(ui().comparison.currentBadge)}</span>` : "";
+
+          return `
+            <tr>
+              <td>${escapeHtml(item.profile)}${currentBadge}</td>
+              <td>${escapeHtml(item.gpu_type)}</td>
+              <td>${escapeHtml(String(item.gpu_count))}</td>
+              <td>${escapeHtml(memory.memory_per_gpu_gb == null || memory.gpu_memory_limit_gb == null ? "n/a" : `${formatNumber(memory.memory_per_gpu_gb)} / ${formatNumber(memory.gpu_memory_limit_gb, 0)} GB`)}</td>
+              <td>${escapeHtml(time.total_time_hours == null ? "n/a" : `${formatNumber(time.total_time_hours)} h`)}</td>
+              <td>${escapeHtml(cost.estimated_cost == null ? "n/a" : `${formatNumber(cost.estimated_cost)} ${cost.currency}`)}</td>
+              <td>${escapeHtml(formatDelta(time.total_time_hours, "h", baseTime))}</td>
+              <td>${escapeHtml(cost.estimated_cost == null || baseCost == null ? "n/a" : `${formatDelta(cost.estimated_cost, cost.currency || "", baseCost)}`)}</td>
+              <td>${escapeHtml(result.runnable ? ui().values.yes : ui().values.no)}</td>
+              <td>${escapeHtml(result.risk_level || "n/a")}</td>
+              <td>${escapeHtml(result.warnings?.[0] || ui().values.none)}</td>
+            </tr>
+          `;
+        }).join("");
+
+        container.innerHTML = `
+          <div class="comparison-table-shell">
+            <table class="comparison-table">
+              <thead>
+                <tr>
+                  <th>${escapeHtml(columns.profile)}</th>
+                  <th>${escapeHtml(columns.gpu)}</th>
+                  <th>${escapeHtml(columns.count)}</th>
+                  <th>${escapeHtml(columns.memory)}</th>
+                  <th>${escapeHtml(columns.time)}</th>
+                  <th>${escapeHtml(columns.cost)}</th>
+                  <th>${escapeHtml(columns.deltaTime)}</th>
+                  <th>${escapeHtml(columns.deltaCost)}</th>
+                  <th>${escapeHtml(columns.runnable)}</th>
+                  <th>${escapeHtml(columns.risk)}</th>
+                  <th>${escapeHtml(columns.notes)}</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        `;
+
+        const validItems = compareData.items.filter((item) => item.result && !item.error);
+        if (validItems.length < 2) {
+          insights.textContent = ui().comparison.insightOnlyOne;
+          return;
+        }
+
+        const fastest = validItems
+          .filter((item) => Number.isFinite(item.result.time?.total_time_hours))
+          .sort((left, right) => left.result.time.total_time_hours - right.result.time.total_time_hours)[0];
+        const cheapest = validItems
+          .filter((item) => Number.isFinite(item.result.cost?.estimated_cost))
+          .sort((left, right) => left.result.cost.estimated_cost - right.result.cost.estimated_cost)[0];
+
+        const parts = [];
+        if (fastest) {
+          parts.push(ui().comparison.insightFastest(
+            `${fastest.gpu_type} x${fastest.gpu_count}`,
+            `${formatNumber(fastest.result.time.total_time_hours)} h`
+          ));
+        }
+        if (cheapest) {
+          parts.push(ui().comparison.insightCheapest(
+            `${cheapest.gpu_type} x${cheapest.gpu_count}`,
+            `${formatNumber(cheapest.result.cost.estimated_cost)} ${cheapest.result.cost.currency}`
+          ));
+        }
+        insights.textContent = parts.join(" ");
+      }
+
+      function applyHardwarePreset(profile) {
+        const option = hardwareOptions.find((item) => item.profile === profile);
+        if (!option) return;
+
+        setInputValue("hardware.profile", option.profile);
+        setInputValue("hardware.gpu_type", option.gpu_type);
+        setInputValue("hardware.gpu_count", option.gpu_count);
+        setInputValue("hardware.gpu_memory_gb", option.gpu_memory_gb);
+        setInputValue("cost.price_profile", option.profile);
+        setInputValue("price.profile_name", option.profile);
+        setInputValue("price.gpu_type", option.gpu_type);
+        setInputValue("price.gpu_count", option.gpu_count);
+        setInputValue("price.monthly_rental_cost", option.monthly_rental_cost);
+
+        const tp = Number(readFieldValue("parallelism.tensor_parallel_size") || 1);
+        const pp = Number(readFieldValue("parallelism.pipeline_parallel_size") || 1);
+        const perReplica = tp * pp;
+        if (option.gpu_count % perReplica === 0) {
+          setInputValue("parallelism.num_gpus", option.gpu_count);
+          setInputValue("parallelism.data_parallel_size", option.gpu_count / perReplica);
+          showStatus("", true);
+        } else {
+          showStatus(ui().hardwarePresetWarning);
+        }
+
+        populateHardwareSelectors();
+      }
+
       async function fetchJson(url, payload) {
         const response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          method: payload ? "POST" : "GET",
+          headers: payload ? { "Content-Type": "application/json" } : undefined,
+          body: payload ? JSON.stringify(payload) : undefined,
         });
         const data = await response.json();
         if (!response.ok) {
@@ -609,82 +1325,269 @@ import "../styles/global.css";
         return data;
       }
 
+      async function loadHardwareOptions() {
+        showStatus(ui().status.loadingHardware);
+        try {
+          const data = await fetchJson(`${API_BASE}/api/hardware-options`);
+          hardwareOptions = data.items || [];
+          populateHardwareSelectors();
+          showStatus("", true);
+        } catch (errorValue) {
+          hardwareOptions = [];
+          populateHardwareSelectors();
+          showStatus(errorValue.message || String(errorValue));
+        }
+      }
+
+      async function runCompare(payload) {
+        if (!payload.compareProfiles.length) {
+          renderComparison({ items: [] });
+          return { ok: true, skipped: true };
+        }
+
+        document.getElementById("comparison").innerHTML = `<div class="helper">${escapeHtml(ui().comparison.waiting)}</div>`;
+        setProgressStep("done", "done", "running", payload.summarize ? "queued" : "skipped", "done");
+        if (!payload.summarize) {
+          setProgress(84, "comparing", "compare");
+          startProgressAnimation(96, "comparing", 4, "left");
+        }
+
+        try {
+          const compareData = await fetchJson(`${API_BASE}/api/compare`, {
+            config: payload.config,
+            prices: payload.prices,
+            compare_profiles: payload.compareProfiles,
+          });
+          renderComparison(compareData);
+          setProgressStep(
+            "done",
+            "done",
+            "done",
+            payload.summarize ? progressState.steps[3] : "skipped",
+            "done"
+          );
+          return { ok: true, skipped: false };
+        } catch (errorValue) {
+          renderComparison({
+            items: [
+              {
+                profile: "compare",
+                gpu_type: ui().values.unavailable,
+                gpu_count: "n/a",
+                error: errorValue.message || String(errorValue),
+                result: null,
+              },
+            ],
+          });
+          setProgressStep(
+            "done",
+            "done",
+            "unavailable",
+            payload.summarize ? progressState.steps[3] : "skipped",
+            "done"
+          );
+          return { ok: false, skipped: false, error: errorValue };
+        } finally {
+          if (!payload.summarize) stopProgressAnimation();
+        }
+      }
+
       async function runSummary(payload, result) {
-        setProgressStep("Done", "Done", "Running", "Visible");
-        startProgressAnimation(94, "Generating summary analysis", payload.provider === "deepseek" ? 18 : 10);
+        const compareProfiles = Array.isArray(payload.compareProfiles) ? payload.compareProfiles : [];
+        setProgressStep(
+          "done",
+          "done",
+          compareProfiles.length ? progressState.steps[2] : "skipped",
+          "running",
+          "done"
+        );
+        setProgress(84, "summarizing", "summary");
+        startProgressAnimation(96, "summarizing", payload.provider === "deepseek" ? 18 : 10, "left");
+
         try {
           const data = await fetchJson(`${API_BASE}/api/summary`, { ...payload, result });
-          stopProgressAnimation();
-          setProgress(100, "Summary complete", "Estimated time left: 0s");
-          setProgressStep("Done", "Done", "Done", "Complete");
           renderSummary(data);
-          showStatus("Estimate and summary complete.", true);
-        } catch (err) {
-          stopProgressAnimation();
-          setProgress(100, "Summary finished with warning", "Estimated time left: 0s");
-          setProgressStep("Done", "Done", "Unavailable", "Complete");
-          renderSummary({ summary_markdown: "", summary_error: err.message || String(err) });
-          showStatus("Estimate is available. Summary failed or was unavailable.");
+          if (latestResult) {
+            latestResult.summary_provider = data.summary_provider;
+            renderResult(latestResult);
+          }
+          setProgressStep(
+            "done",
+            "done",
+            compareProfiles.length ? progressState.steps[2] : "skipped",
+            "done",
+            "done"
+          );
+          return { ok: true };
+        } catch (errorValue) {
+          renderSummary({ summary_markdown: "", summary_error: errorValue.message || String(errorValue) });
+          setProgressStep(
+            "done",
+            "done",
+            compareProfiles.length ? progressState.steps[2] : "skipped",
+            "unavailable",
+            "done"
+          );
+          return { ok: false, error: errorValue };
         } finally {
-          document.getElementById("estimateButton").disabled = false;
+          stopProgressAnimation();
         }
       }
 
       async function estimate() {
         document.getElementById("estimateButton").disabled = true;
-        document.getElementById("summary").textContent = "Waiting for summary analysis...";
+        document.getElementById("summary").textContent = ui().summary.waiting;
+        document.getElementById("comparison").innerHTML = `<div class="helper">${escapeHtml(ui().values.comparisonLoading)}</div>`;
+        document.getElementById("comparisonInsights").textContent = "";
+
         try {
           const payload = collectPayload();
-          showStatus("Validating inputs...");
-          setProgress(8, "Validating configuration", "Estimated time left: 2s");
-          setProgressStep("Running", "Waiting", "Waiting", "Waiting");
+          const estimatePayload = {
+            config: payload.config,
+            prices: payload.prices,
+            provider: payload.provider,
+            language: payload.language,
+            compareProfiles: payload.compareProfiles,
+          };
+          latestEstimatePayload = estimatePayload;
 
-          startProgressAnimation(62, "Running estimator pipeline", 3);
-          const estimatePayload = { config: payload.config, prices: payload.prices, provider: payload.provider };
+          showStatus(ui().status.validating);
+          setProgress(8, "validating", "left", 2);
+          setProgressStep("running", "waiting", "waiting", "waiting", "waiting");
+
+          startProgressAnimation(62, "estimating", 3, "left");
           const estimateData = await fetchJson(`${API_BASE}/api/estimate`, estimatePayload);
           stopProgressAnimation();
 
           renderResult(estimateData);
-          setProgress(72, "Estimate ready", payload.summarize ? "Estimated time left: 10-20s" : "Estimated time left: 0s");
-          setProgressStep("Done", "Done", payload.summarize ? "Queued" : "Skipped", "Visible");
-          showStatus("Estimate is ready. Rendering result immediately...");
+          setProgress(72, "estimateReady", payload.summarize ? "summary" : payload.compareProfiles.length ? "compare" : "ready");
+          setProgressStep(
+            "done",
+            "done",
+            payload.compareProfiles.length ? "queued" : "skipped",
+            payload.summarize ? "queued" : "skipped",
+            "done"
+          );
+          showStatus(payload.compareProfiles.length || payload.summarize ? ui().status.waitingBackground : ui().status.estimateReady);
 
+          if (!payload.compareProfiles.length) {
+            renderComparison({ items: [] });
+          }
           if (!payload.summarize) {
             renderSummary({ summary_markdown: "", summary_error: null });
-            setProgress(100, "Estimate complete", "Estimated time left: 0s");
-            setProgressStep("Done", "Done", "Skipped", "Complete");
-            showStatus("Estimate complete.", true);
+          }
+
+          const backgroundTasks = [];
+          if (payload.compareProfiles.length) {
+            backgroundTasks.push(runCompare(payload));
+          }
+          if (payload.summarize) {
+            backgroundTasks.push(runSummary(estimatePayload, estimateData.result));
+          }
+
+          if (!backgroundTasks.length) {
+            setProgress(100, "complete", "ready");
+            setProgressStep("done", "done", "skipped", "skipped", "complete");
+            showStatus(ui().status.estimateComplete, true);
             document.getElementById("estimateButton").disabled = false;
             return;
           }
 
-          await runSummary(estimatePayload, estimateData.result);
-        } catch (err) {
+          const settled = await Promise.all(backgroundTasks);
+          const hasFailure = settled.some((item) => item && item.ok === false);
+          const compareRan = payload.compareProfiles.length > 0;
+          const summaryRan = payload.summarize;
+
+          setProgress(100, hasFailure ? "warning" : "complete", "ready");
+          setProgressStep(
+            "done",
+            "done",
+            compareRan ? progressState.steps[2] : "skipped",
+            summaryRan ? progressState.steps[3] : "skipped",
+            "complete"
+          );
+
+          if (hasFailure) {
+            showStatus(ui().status.summaryWarning);
+          } else if (compareRan && summaryRan) {
+            showStatus(ui().status.allComplete, true);
+          } else if (compareRan) {
+            showStatus(ui().status.compareComplete, true);
+          } else {
+            showStatus(ui().status.summaryComplete, true);
+          }
+        } catch (errorValue) {
           stopProgressAnimation();
-          setProgress(0, "Idle", "Estimated time: n/a");
-          setProgressStep("Error", "Waiting", "Waiting", "Waiting");
-          showStatus(err.message || String(err));
+          setProgress(0, "idle", "unknown");
+          setProgressStep("error", "waiting", "waiting", "waiting", "waiting");
+          showStatus(errorValue.message || String(errorValue));
+        } finally {
           document.getElementById("estimateButton").disabled = false;
+        }
+      }
+
+      function refreshLocalizedUi() {
+        updateStaticTexts();
+        updateFieldCopy();
+        setProgress(currentProgressPercent, progressState.stageKey, progressState.etaMode, progressState.etaValue);
+        setProgressStep(...progressState.steps);
+        if (latestResult) {
+          renderResult(latestResult);
+        } else {
+          document.getElementById("metrics").innerHTML = [
+            metric(ui().metrics.runnable, ui().values.notRun),
+            metric(ui().metrics.risk, ui().values.notRun),
+            metric(ui().metrics.memory, ui().values.notRun),
+            metric(ui().metrics.utilization, ui().values.notRun),
+            metric(ui().metrics.time, ui().values.notRun),
+            metric(ui().metrics.gpuHours, ui().values.notRun),
+            metric(ui().metrics.cost, ui().values.notRun),
+            metric(ui().metrics.provider, ui().values.notRun),
+          ].join("");
+          document.getElementById("rawResult").textContent = "{}";
+        }
+
+        if (latestCompareData) renderComparison(latestCompareData);
+        else document.getElementById("comparison").innerHTML = `<div class="helper">${escapeHtml(ui().comparison.placeholder)}</div>`;
+
+        if (!latestResult) {
+          document.getElementById("summary").textContent = ui().summary.placeholder;
         }
       }
 
       document.getElementById("languageToggle").addEventListener("click", () => {
         language = language === "en" ? "zh" : "en";
-        updateMeanings();
+        refreshLocalizedUi();
+        if (latestEstimatePayload && latestResult?.result) {
+          const refreshedPayload = { ...latestEstimatePayload, language };
+          latestEstimatePayload = refreshedPayload;
+          document.getElementById("summary").textContent = ui().summary.waiting;
+          runSummary(refreshedPayload, latestResult.result);
+        }
       });
 
       document.getElementById("loadExample").addEventListener("click", () => {
         loadValues(example);
+        populateHardwareSelectors();
       });
 
       document.getElementById("clearForm").addEventListener("click", () => {
         clearValues();
+        renderComparison({ items: [] });
+        renderSummary({ summary_markdown: "", summary_error: null });
+        document.getElementById("summary").textContent = ui().summary.placeholder;
       });
 
       document.getElementById("estimateButton").addEventListener("click", estimate);
 
       renderForm();
-      setProgressStep("Waiting", "Waiting", "Waiting", "Waiting");
+      refreshLocalizedUi();
+      setProgress(0, "idle", "unknown");
+      setProgressStep("waiting", "waiting", "waiting", "waiting", "waiting");
+      renderComparison({ items: [] });
+      document.getElementById("summary").textContent = ui().summary.placeholder;
+      loadValues(example);
+      loadHardwareOptions().then(() => populateHardwareSelectors());
     </script>
   </body>
 </html>

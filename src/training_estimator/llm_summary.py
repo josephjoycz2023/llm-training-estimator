@@ -13,6 +13,7 @@ from training_estimator.schema import EstimatorConfig, FinalResult
 
 
 Provider = Literal["auto", "openai", "deepseek"]
+Language = Literal["en", "zh"]
 LOCAL_CONFIG = Path("config.local.yaml")
 REFERENCE_CONFIG = Path("D:/paper_daily/Personalized-Research-Dashboard/config.yaml")
 
@@ -194,16 +195,27 @@ def _request_deepseek(prompt: str, config: dict[str, Any]) -> str:
     raise SummaryRequestError("No DeepSeek API key succeeded: " + "; ".join(failures))
 
 
-def build_summary_prompt(config: EstimatorConfig, result: FinalResult) -> str:
+def build_summary_prompt(
+    config: EstimatorConfig,
+    result: FinalResult,
+    language: Language = "en",
+) -> str:
     compact_result = result.model_dump(mode="json")
     compact_result["memory"].pop("raw_output", None)
     if compact_result.get("time"):
         compact_result["time"].pop("raw_output", None)
 
+    language_instruction = (
+        "Write the full answer in Simplified Chinese."
+        if language == "zh"
+        else "Write the full answer in English."
+    )
+
     return f"""
 You are analyzing an LLM training estimate for an engineer.
 
 Return Markdown only. Keep it concise and practical.
+{language_instruction}
 
 Cover:
 - whether the run is actionable,
@@ -225,10 +237,11 @@ def generate_summary(
     config: EstimatorConfig,
     result: FinalResult,
     provider: Provider = "auto",
+    language: Language = "en",
 ) -> tuple[str, str]:
     llm_config = load_reference_llm_config()
     resolved = _resolve_provider(llm_config, provider)
-    prompt = build_summary_prompt(config, result)
+    prompt = build_summary_prompt(config, result, language)
     if resolved == "deepseek":
         return _request_deepseek(prompt, llm_config), resolved
     return _request_openai(prompt, llm_config), resolved

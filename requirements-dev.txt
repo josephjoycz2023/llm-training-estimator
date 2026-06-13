@@ -4,6 +4,7 @@ typer
 rich
 pandas
 tabulate
+fire
 pytest
 black
 ruff

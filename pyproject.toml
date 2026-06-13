@@ -9,7 +9,8 @@ dependencies = [
     "typer",
     "rich",
     "pandas",
-    "tabulate"
+    "tabulate",
+    "fire"
 ]
 
 [project.scripts]

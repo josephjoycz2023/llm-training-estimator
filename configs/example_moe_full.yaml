@@ -1,22 +1,22 @@
 version: "0.1"
 
 run:
-  name: qwen_7b_full_h100_zero3
-  description: qwen-like dense full fine-tuning on H100 x8
+  name: mixtral_like_moe_h100_zero2
+  description: MoE full fine-tuning example for schema and backend pass-through
 
 model:
-  name: qwen-7b-like
-  architecture: dense
-  total_params_b: 7
-  active_params_b: null
+  name: mixtral-like-8x7b
+  architecture: moe
+  total_params_b: 46.7
+  active_params_b: 12.9
   num_layers: 32
   hidden_size: 4096
   num_attention_heads: 32
-  vocab_size: 152064
+  vocab_size: 32000
   seq_len: 4096
   moe:
-    num_experts: null
-    experts_per_token: null
+    num_experts: 8
+    experts_per_token: 2
     expert_parallel_size: 1
 
 training:
@@ -28,7 +28,7 @@ training:
   global_batch_size: 64
   epochs: 1
   total_tokens_b: 1
-  activation_checkpointing: 1
+  activation_checkpointing: 2
 
 peft:
   enabled: false
@@ -48,7 +48,7 @@ parallelism:
 
 deepspeed:
   enabled: true
-  zero_stage: 3
+  zero_stage: 2
   offload_optimizer: none
   offload_param: none
 

@@ -8,4 +8,12 @@ src/llm_training_estimator.egg-info/requires.txt
 src/llm_training_estimator.egg-info/top_level.txt
 src/training_estimator/__init__.py
 src/training_estimator/cli.py
+src/training_estimator/config_loader.py
+src/training_estimator/cost.py
+src/training_estimator/coverage.py
+src/training_estimator/pipeline.py
+src/training_estimator/report.py
+src/training_estimator/schema.py
 src/training_estimator/adapters/__init__.py
+src/training_estimator/adapters/gpu_mem_adapter.py
+src/training_estimator/adapters/llm_analysis_adapter.py

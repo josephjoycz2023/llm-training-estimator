@@ -1,6 +1,7 @@
 currency: CNY
+hours_per_month: 720
 
-hardware:
+hardware_prices:
   h100_80g_8gpu:
     gpu_type: H100-80G
     gpu_count: 8

@@ -1,0 +1,6 @@
+[submodule "llm-analysis"]
+	path = llm-analysis
+	url = git@github.com:cli99/llm-analysis.git
+[submodule "gpu-mem-calculator"]
+	path = gpu-mem-calculator
+	url = git@github.com:George614/gpu-mem-calculator.git

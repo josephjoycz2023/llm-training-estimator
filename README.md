@@ -60,6 +60,31 @@ python -m training_estimator.cli estimate configs/example_qwen_7b_zero3.yaml \
 
 Supported formats are `table`, `json`, and `markdown`.
 
+## Web UI
+
+The Web UI follows the Astro setup used by `Personalized-Research-Dashboard/web`.
+It provides block-by-block schema inputs, typed validation, English/Chinese meaning
+tooltips, estimator results, and an optional Markdown summary from OpenAI or DeepSeek.
+
+Start the Python API:
+
+```bash
+python -m uvicorn training_estimator.web_api:app --reload --port 8000
+```
+
+Start the Astro UI in another terminal:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open `http://localhost:4321`. The summary API reads local test keys from the same
+places as the research dashboard: `D:/paper_daily/Personalized-Research-Dashboard/config.yaml`,
+its sibling `config.local.yaml`, this project's own `config.local.yaml`, or
+`OPENAI_API_KEY` / `DEEPSEEK_API_KEY`.
+
 ## Unified Config
 
 The MVP config is intentionally strict and split into these blocks:

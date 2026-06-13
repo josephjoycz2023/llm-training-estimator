@@ -5,6 +5,9 @@ rich
 pandas
 tabulate
 fire
+fastapi
+uvicorn
+requests
 pytest
 black
 ruff

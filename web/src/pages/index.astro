@@ -1,0 +1,690 @@
+---
+import "../styles/global.css";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Training Estimator</title>
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div class="brand">
+          <h1>LLM Training Estimator</h1>
+          <p>Fill the unified YAML schema by block, validate typed inputs, and estimate memory, time, GPU-hours, and rental cost.</p>
+        </div>
+        <div class="actions">
+          <button class="button" id="languageToggle" type="button">Meaning: English</button>
+          <button class="button" id="loadExample" type="button">Load Dense Example</button>
+          <button class="button" id="clearForm" type="button">Clear</button>
+          <button class="button primary" id="estimateButton" type="button">Estimate</button>
+        </div>
+      </header>
+
+      <div class="layout">
+        <form id="configForm" novalidate></form>
+
+        <aside class="panel">
+          <div id="status" class="notice" hidden></div>
+          <section class="result-card">
+            <h2>Progress</h2>
+            <div class="progress-shell">
+              <div class="progress-bar">
+                <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+              </div>
+              <div class="progress-meta">
+                <strong id="progressStage">Idle</strong>
+                <span id="progressEta">Estimated time: n/a</span>
+              </div>
+            </div>
+            <div class="summary-grid" id="progressSteps">
+              <div class="metric"><span>Validation</span><strong>Waiting</strong></div>
+              <div class="metric"><span>Estimate</span><strong>Waiting</strong></div>
+              <div class="metric"><span>Summary</span><strong>Waiting</strong></div>
+              <div class="metric"><span>Display</span><strong>Waiting</strong></div>
+            </div>
+          </section>
+
+          <section class="result-card">
+            <h2>Result</h2>
+            <div class="summary-grid" id="metrics">
+              <div class="metric"><span>Runnable</span><strong>Not run</strong></div>
+              <div class="metric"><span>Risk level</span><strong>Not run</strong></div>
+              <div class="metric"><span>Avg memory / GPU</span><strong>Not run</strong></div>
+              <div class="metric"><span>Utilization</span><strong>Not run</strong></div>
+              <div class="metric"><span>Time</span><strong>Not run</strong></div>
+              <div class="metric"><span>GPU-hours</span><strong>Not run</strong></div>
+              <div class="metric"><span>Cost</span><strong>Not run</strong></div>
+              <div class="metric"><span>Summary provider</span><strong>Not run</strong></div>
+            </div>
+            <p class="helper" id="memoryNote">Memory is shown as average per GPU, compared against the per-GPU limit.</p>
+          </section>
+
+          <section class="result-card">
+            <h3>Summary Analysis</h3>
+            <div id="summary" class="markdown">Run an estimate to generate a Markdown analysis.</div>
+          </section>
+
+          <section class="result-card">
+            <h3>Raw Result</h3>
+            <pre id="rawResult" class="raw">{}</pre>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <script>
+      const API_BASE = "http://127.0.0.1:8000";
+      let language = "en";
+      let progressTimer = null;
+      let currentProgressPercent = 0;
+
+      function field(path, type, meaningEn, meaningZh, options = {}) {
+        return { path, type, meaning: { en: meaningEn, zh: meaningZh }, ...options };
+      }
+
+      const schema = [
+        {
+          id: "run",
+          title: "run",
+          description: "Metadata",
+          fields: [
+            field("version", "string", "Config schema version marker. Currently informational.", "配置 schema 版本标记，当前主要用于说明。", { default: "0.1" }),
+            field("run.name", "string", "Run identifier used in reports and output JSON.", "运行名称，会出现在报告和输出 JSON 中。", { required: true }),
+            field("run.description", "string", "Human-readable note for this run.", "这次估算的人类可读说明。", { multiline: true }),
+          ],
+        },
+        {
+          id: "model",
+          title: "model",
+          description: "Architecture and scale",
+          fields: [
+            field("model.name", "string", "Model name passed through to backend configs.", "模型名称，会传递给后端配置。", { required: true }),
+            field("model.architecture", "enum", "Select dense or mixture-of-experts validation behavior.", "选择 dense 或 MoE，并触发对应校验规则。", { options: ["dense", "moe"], default: "dense" }),
+            field("model.total_params_b", "float", "Total model parameters in billions. Used by memory estimation.", "模型总参数量，单位为十亿。显存估算会使用。", { required: true }),
+            field("model.active_params_b", "float", "Active parameters in billions. Dense defaults to total_params_b; MoE requires it.", "激活参数量，单位为十亿。dense 可留空，MoE 必填。", { nullable: true }),
+            field("model.num_layers", "int", "Transformer layer count.", "Transformer 层数。", { required: true }),
+            field("model.hidden_size", "int", "Hidden dimension.", "隐藏层维度。", { required: true }),
+            field("model.num_attention_heads", "int", "Attention head count.", "注意力头数量。", { required: true }),
+            field("model.vocab_size", "int", "Vocabulary size.", "词表大小。", { required: true }),
+            field("model.seq_len", "int", "Training sequence length.", "训练序列长度。", { required: true }),
+            field("model.moe.num_experts", "int", "Total number of experts. Required for MoE; leave empty for dense.", "专家总数。MoE 必填，dense 留空。", { nullable: true }),
+            field("model.moe.experts_per_token", "int", "Top-k experts activated per token. Required for MoE; leave empty for dense.", "每个 token 激活的专家数。MoE 必填，dense 留空。", { nullable: true }),
+            field("model.moe.expert_parallel_size", "int", "Model-local expert parallel size. Must stay 1 for dense.", "模型局部专家并行大小。dense 必须为 1。", { default: 1 }),
+          ],
+        },
+        {
+          id: "training",
+          title: "training",
+          description: "Mode, precision, batch, tokens",
+          fields: [
+            field("training.mode", "enum", "Training method. Only full has precise backend estimates in this MVP.", "训练方式。当前 MVP 只有 full 会给出较完整后端估算。", { options: ["full", "lora", "qlora"], default: "full" }),
+            field("training.precision", "enum", "Training precision. Low-bit training support depends on the backend.", "训练精度。低比特训练的后端支持可能不同。", { options: ["fp32", "fp16", "bf16", "int8", "int4"], default: "bf16" }),
+            field("training.optimizer", "enum", "Optimizer passed to gpu-mem-calculator.", "传递给 gpu-mem-calculator 的优化器。", { options: ["adamw", "adamw_8bit", "sgd"], default: "adamw" }),
+            field("training.micro_batch_size", "int", "Per-GPU micro batch size.", "每张 GPU 的 micro batch size。", { required: true }),
+            field("training.gradient_accumulation_steps", "int", "Number of gradient accumulation steps.", "梯度累积步数。", { required: true }),
+            field("training.global_batch_size", "int", "Global batch size used by llm-analysis.", "llm-analysis 使用的全局 batch size。", { required: true }),
+            field("training.epochs", "int", "Informational in the current MVP; token count drives time estimate.", "当前 MVP 中主要是信息字段；时间估算由 total_tokens_b 驱动。", { default: 1 }),
+            field("training.total_tokens_b", "float", "Total training tokens in billions.", "训练 token 总量，单位为十亿。", { required: true }),
+            field("training.activation_checkpointing", "int", "Activation recomputation level from 0 to 4.", "激活重计算等级，取值范围 0 到 4。", { default: 0, min: 0, max: 4 }),
+          ],
+        },
+        {
+          id: "peft",
+          title: "peft",
+          description: "Schema-only PEFT metadata",
+          fields: [
+            field("peft.enabled", "bool", "Enable the PEFT schema path. Must be false for full fine-tuning.", "启用 PEFT schema 路径。full fine-tuning 时必须为 false。", { default: false }),
+            field("peft.method", "enum", "Must match training.mode when mode is lora or qlora.", "当 training.mode 为 lora 或 qlora 时必须一致。", { options: ["lora", "qlora"], nullable: true }),
+            field("peft.trainable_params_b", "float", "Trainable parameter count in billions. Required for PEFT modes.", "可训练参数量，单位十亿。PEFT 模式必填。", { nullable: true }),
+            field("peft.lora_rank", "int", "LoRA rank metadata.", "LoRA rank 元数据。", { nullable: true }),
+            field("peft.lora_alpha", "int", "LoRA alpha metadata.", "LoRA alpha 元数据。", { nullable: true }),
+            field("peft.target_modules", "string_list", "Comma-separated target module names for LoRA metadata.", "LoRA 目标模块名，用逗号分隔。", { nullable: true, full: true }),
+          ],
+        },
+        {
+          id: "parallelism",
+          title: "parallelism",
+          description: "Distributed layout",
+          fields: [
+            field("parallelism.num_gpus", "int", "Total GPU count used by the run.", "本次运行使用的 GPU 总数。", { required: true }),
+            field("parallelism.tensor_parallel_size", "int", "Tensor parallel degree.", "张量并行大小。", { default: 1 }),
+            field("parallelism.pipeline_parallel_size", "int", "Pipeline parallel degree.", "流水线并行大小。", { default: 1 }),
+            field("parallelism.data_parallel_size", "int", "Data parallel degree.", "数据并行大小。", { default: 1 }),
+            field("parallelism.expert_parallel_size", "int", "Expert parallel degree passed to llm-analysis. Must be 1 for dense.", "传递给 llm-analysis 的专家并行大小。dense 必须为 1。", { default: 1 }),
+            field("parallelism.sequence_parallel", "bool", "Enable sequence parallel mapping in llm-analysis.", "启用 llm-analysis 中的 sequence parallel 映射。", { default: false }),
+          ],
+        },
+        {
+          id: "deepspeed",
+          title: "deepspeed",
+          description: "ZeRO and offload",
+          fields: [
+            field("deepspeed.enabled", "bool", "Select the DeepSpeed engine in gpu-mem-calculator.", "在 gpu-mem-calculator 中选择 DeepSpeed 引擎。", { default: true }),
+            field("deepspeed.zero_stage", "int", "ZeRO stage passed to both backends when enabled.", "启用时传递给两个后端的 ZeRO stage。", { default: 3, min: 0, max: 3 }),
+            field("deepspeed.offload_optimizer", "enum", "Optimizer state offload setting. Time overhead is not modeled.", "优化器状态 offload 设置。时间侧不建模 offload 额外开销。", { options: ["none", "cpu", "nvme"], default: "none" }),
+            field("deepspeed.offload_param", "enum", "Parameter offload setting. Time overhead is not modeled.", "参数 offload 设置。时间侧不建模 offload 额外开销。", { options: ["none", "cpu", "nvme"], default: "none" }),
+          ],
+        },
+        {
+          id: "hardware",
+          title: "hardware",
+          description: "GPU and efficiency",
+          fields: [
+            field("hardware.profile", "string", "Hardware profile name. Also used as llm-analysis GPU lookup fallback.", "硬件 profile 名称，也作为 llm-analysis GPU 查找的 fallback。", { required: true }),
+            field("hardware.gpu_type", "string", "Human-readable GPU type, such as H100-80G or A100-80G.", "GPU 类型，例如 H100-80G 或 A100-80G。", { required: true }),
+            field("hardware.gpu_count", "int", "Total GPU count. Must equal parallelism.num_gpus.", "GPU 总数，必须等于 parallelism.num_gpus。", { required: true }),
+            field("hardware.gpu_memory_gb", "float", "Memory per GPU in GB.", "每张 GPU 显存，单位 GB。", { required: true }),
+            field("hardware.flops_efficiency", "float", "Achieved FLOPS efficiency passed to llm-analysis.", "传递给 llm-analysis 的 FLOPS 效率。", { default: 1, min: 0, max: 1 }),
+            field("hardware.memory_efficiency", "float", "HBM memory efficiency passed to llm-analysis.", "传递给 llm-analysis 的 HBM memory efficiency。", { default: 1, min: 0, max: 1 }),
+          ],
+        },
+        {
+          id: "cost",
+          title: "cost",
+          description: "Rental price profile",
+          fields: [
+            field("cost.price_profile", "string", "Must exist in price YAML hardware_prices.", "必须存在于价格配置 hardware_prices 中。", { required: true }),
+            field("price.currency", "string", "Currency label used in reports.", "报告中显示的货币单位。", { default: "CNY" }),
+            field("price.hours_per_month", "float", "Divisor for converting monthly rental to hourly cluster cost.", "用于把月租换算为小时成本的月小时数。", { default: 720 }),
+            field("price.profile_name", "string", "Price profile key. Usually matches cost.price_profile.", "价格 profile 的 key，通常与 cost.price_profile 一致。", { required: true }),
+            field("price.gpu_type", "string", "Human-readable GPU type for the price profile.", "价格 profile 对应的 GPU 类型。", { required: true }),
+            field("price.gpu_count", "int", "Number of GPUs covered by this monthly rental price.", "该月租价格覆盖的 GPU 数量。", { required: true }),
+            field("price.monthly_rental_cost", "float", "Monthly rental cost for this profile.", "该 profile 的月租成本。", { required: true }),
+          ],
+        },
+        {
+          id: "analysis",
+          title: "analysis",
+          description: "LLM summary",
+          fields: [
+            field("ui.provider", "enum", "Provider for the Markdown summary. Auto follows local config and available keys.", "Markdown 总结使用的模型供应商。auto 会根据本地配置和可用 key 选择。", { options: ["auto", "openai", "deepseek"], default: "auto" }),
+            field("ui.summarize", "bool", "Generate a Markdown analysis after estimation.", "估算完成后生成 Markdown 分析。", { default: true }),
+          ],
+        },
+      ];
+
+      const example = {
+        version: "0.1",
+        run: { name: "qwen_7b_full_h100_zero3", description: "qwen-like dense full fine-tuning on H100 x8" },
+        model: {
+          name: "qwen-7b-like",
+          architecture: "dense",
+          total_params_b: 7,
+          active_params_b: null,
+          num_layers: 32,
+          hidden_size: 4096,
+          num_attention_heads: 32,
+          vocab_size: 152064,
+          seq_len: 4096,
+          moe: { num_experts: null, experts_per_token: null, expert_parallel_size: 1 },
+        },
+        training: {
+          mode: "full",
+          precision: "bf16",
+          optimizer: "adamw",
+          micro_batch_size: 1,
+          gradient_accumulation_steps: 8,
+          global_batch_size: 64,
+          epochs: 1,
+          total_tokens_b: 1,
+          activation_checkpointing: 1,
+        },
+        peft: { enabled: false, method: null, trainable_params_b: null, lora_rank: null, lora_alpha: null, target_modules: null },
+        parallelism: { num_gpus: 8, tensor_parallel_size: 1, pipeline_parallel_size: 1, data_parallel_size: 8, expert_parallel_size: 1, sequence_parallel: false },
+        deepspeed: { enabled: true, zero_stage: 3, offload_optimizer: "none", offload_param: "none" },
+        hardware: { profile: "h100_80g_8gpu", gpu_type: "H100-80G", gpu_count: 8, gpu_memory_gb: 80, flops_efficiency: 0.35, memory_efficiency: 0.9 },
+        cost: { price_profile: "h100_80g_8gpu" },
+        price: { currency: "CNY", hours_per_month: 720, profile_name: "h100_80g_8gpu", gpu_type: "H100-80G", gpu_count: 8, monthly_rental_cost: 45000 },
+        ui: { provider: "auto", summarize: true },
+      };
+
+      function getPath(obj, path) {
+        return path.split(".").reduce((acc, key) => (acc == null ? undefined : acc[key]), obj);
+      }
+
+      function setPath(obj, path, value) {
+        const parts = path.split(".");
+        let target = obj;
+        for (const part of parts.slice(0, -1)) {
+          target[part] ??= {};
+          target = target[part];
+        }
+        target[parts.at(-1)] = value;
+      }
+
+      function allFields() {
+        return schema.flatMap((section) => section.fields);
+      }
+
+      function renderForm() {
+        const form = document.getElementById("configForm");
+        form.innerHTML = "";
+        for (const section of schema) {
+          const details = document.createElement("details");
+          details.className = "section";
+          details.open = true;
+          details.innerHTML = `<summary>${section.title}<span>${section.description}</span></summary><div class="fields"></div>`;
+          const fields = details.querySelector(".fields");
+          for (const spec of section.fields) {
+            fields.appendChild(renderField(spec));
+          }
+          form.appendChild(details);
+        }
+        loadValues(example);
+      }
+
+      function renderField(spec) {
+        const wrapper = document.createElement("div");
+        wrapper.className = `field ${spec.full ? "full" : ""}`;
+        wrapper.dataset.path = spec.path;
+        wrapper.innerHTML = `
+          <div class="meaning" data-meaning>${spec.meaning[language]}</div>
+          <div class="label-row">
+            <label for="${spec.path}">${spec.path}</label>
+            <span class="type">${spec.type}${spec.required ? " · required" : ""}</span>
+          </div>
+        `;
+
+        let input;
+        if (spec.type === "enum") {
+          input = document.createElement("select");
+          input.innerHTML = `<option value=""></option>${spec.options.map((option) => `<option value="${option}">${option}</option>`).join("")}`;
+        } else if (spec.type === "bool") {
+          input = document.createElement("label");
+          input.className = "checkbox";
+          input.innerHTML = `<input id="${spec.path}" data-input type="checkbox" /> enabled`;
+          wrapper.appendChild(input);
+          wrapper.insertAdjacentHTML("beforeend", `<div class="error"></div>`);
+          input.querySelector("input").addEventListener("input", () => validateField(wrapper));
+          return wrapper;
+        } else if (spec.multiline) {
+          input = document.createElement("textarea");
+        } else {
+          input = document.createElement("input");
+          input.type = spec.type === "int" || spec.type === "float" ? "number" : "text";
+          if (spec.type === "int") input.step = "1";
+          if (spec.type === "float") input.step = "any";
+          if (spec.min !== undefined) input.min = String(spec.min);
+          if (spec.max !== undefined) input.max = String(spec.max);
+        }
+
+        input.id = spec.path;
+        input.dataset.input = "true";
+        input.addEventListener("input", () => validateField(wrapper));
+        wrapper.appendChild(input);
+        wrapper.insertAdjacentHTML("beforeend", `<div class="error"></div>`);
+        return wrapper;
+      }
+
+      function updateMeanings() {
+        for (const spec of allFields()) {
+          const wrapper = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"]`);
+          if (wrapper) {
+            wrapper.querySelector("[data-meaning]").textContent = spec.meaning[language];
+          }
+        }
+        document.getElementById("languageToggle").textContent = language === "en" ? "Meaning: English" : "提示：中文";
+      }
+
+      function loadValues(values) {
+        for (const spec of allFields()) {
+          const input = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"] [data-input]`);
+          if (!input) continue;
+          const value = getPath(values, spec.path);
+          if (spec.type === "bool") {
+            input.checked = Boolean(value);
+          } else {
+            input.value = value == null ? "" : Array.isArray(value) ? value.join(", ") : String(value);
+          }
+          validateField(input.closest(".field"));
+        }
+      }
+
+      function clearValues() {
+        for (const wrapper of document.querySelectorAll(".field")) {
+          const input = wrapper.querySelector("[data-input]");
+          if (!input) continue;
+          if (input.type === "checkbox") {
+            input.checked = false;
+          } else {
+            input.value = "";
+          }
+          validateField(wrapper);
+        }
+      }
+
+      function parseField(spec, input) {
+        if (spec.type === "bool") return input.checked;
+        const raw = input.value.trim();
+        if (raw === "") {
+          if (spec.nullable) return null;
+          return undefined;
+        }
+        if (spec.type === "int") {
+          const value = Number(raw);
+          if (!Number.isInteger(value)) throw new Error("Must be an integer.");
+          return value;
+        }
+        if (spec.type === "float") {
+          const value = Number(raw);
+          if (!Number.isFinite(value)) throw new Error("Must be a number.");
+          return value;
+        }
+        if (spec.type === "string_list") {
+          return raw.split(",").map((item) => item.trim()).filter(Boolean);
+        }
+        return raw;
+      }
+
+      function validateField(wrapper, forSubmit = false) {
+        const spec = allFields().find((item) => item.path === wrapper.dataset.path);
+        const input = wrapper.querySelector("[data-input]");
+        const error = wrapper.querySelector(".error");
+        wrapper.classList.remove("invalid");
+        error.textContent = "";
+        try {
+          const value = parseField(spec, input);
+          if (forSubmit && spec.required && (value === undefined || value === null || value === "")) {
+            throw new Error("Required for estimate.");
+          }
+          if ((spec.type === "int" || spec.type === "float") && value !== undefined && value !== null) {
+            if (spec.min !== undefined && value < spec.min) throw new Error(`Must be >= ${spec.min}.`);
+            if (spec.max !== undefined && value > spec.max) throw new Error(`Must be <= ${spec.max}.`);
+          }
+          return true;
+        } catch (err) {
+          wrapper.classList.add("invalid");
+          error.textContent = err.message;
+          return false;
+        }
+      }
+
+      function collectPayload() {
+        let valid = true;
+        const data = {};
+        for (const spec of allFields()) {
+          const wrapper = document.querySelector(`.field[data-path="${CSS.escape(spec.path)}"]`);
+          const input = wrapper.querySelector("[data-input]");
+          valid = validateField(wrapper, true) && valid;
+          if (!valid && wrapper.classList.contains("invalid")) continue;
+          const value = parseField(spec, input);
+          if (value !== undefined) setPath(data, spec.path, value);
+        }
+        if (!valid) throw new Error("Please fix highlighted fields first.");
+
+        const config = structuredClone(data);
+        const price = config.price || {};
+        const ui = config.ui || {};
+        delete config.price;
+        delete config.ui;
+
+        if (!config.cost?.price_profile && price.profile_name) {
+          config.cost ??= {};
+          config.cost.price_profile = price.profile_name;
+        }
+
+        const profileName = price.profile_name || config.cost?.price_profile || "custom";
+        const prices = {
+          currency: price.currency || "CNY",
+          hours_per_month: price.hours_per_month || 720,
+          hardware_prices: {
+            [profileName]: {
+              gpu_type: price.gpu_type,
+              gpu_count: price.gpu_count,
+              monthly_rental_cost: price.monthly_rental_cost,
+            },
+          },
+        };
+
+        return {
+          config,
+          prices,
+          summarize: Boolean(ui.summarize),
+          provider: ui.provider || "auto",
+        };
+      }
+
+      function showStatus(message, hidden = false) {
+        const status = document.getElementById("status");
+        status.hidden = hidden;
+        status.textContent = message;
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+      }
+
+      function metric(label, value, className = "") {
+        return `<div class="metric"><span>${label}</span><strong class="${className}">${escapeHtml(value ?? "n/a")}</strong></div>`;
+      }
+
+      function setProgressStep(validation, estimate, summary, display) {
+        document.getElementById("progressSteps").innerHTML = [
+          metric("Validation", validation),
+          metric("Estimate", estimate),
+          metric("Summary", summary),
+          metric("Display", display),
+        ].join("");
+      }
+
+      function setProgress(percent, stage, etaText) {
+        currentProgressPercent = percent;
+        document.getElementById("progressFill").style.width = `${percent}%`;
+        document.getElementById("progressStage").textContent = stage;
+        document.getElementById("progressEta").textContent = etaText;
+      }
+
+      function startProgressAnimation(targetPercent, stage, totalSeconds) {
+        clearInterval(progressTimer);
+        const startPercent = currentProgressPercent;
+        const startedAt = Date.now();
+        progressTimer = setInterval(() => {
+          const elapsed = (Date.now() - startedAt) / 1000;
+          const ratio = Math.min(elapsed / totalSeconds, 1);
+          const nextPercent = startPercent + (targetPercent - startPercent) * ratio;
+          const remaining = Math.max(totalSeconds - elapsed, 0);
+          setProgress(nextPercent, stage, `Estimated time left: ${remaining.toFixed(0)}s`);
+          if (ratio >= 1) {
+            clearInterval(progressTimer);
+          }
+        }, 150);
+      }
+
+      function stopProgressAnimation() {
+        clearInterval(progressTimer);
+        progressTimer = null;
+      }
+
+      function renderResult(data) {
+        const result = data.result;
+        const memory = result.memory || {};
+        const time = result.time || {};
+        const cost = result.cost || {};
+        const gpuCount = result?.time?.raw_output?.total_num_gpus || result?.memory?.raw_output?.total_memory_all_gpus_gb && result?.memory?.memory_per_gpu_gb ? Math.round(result.memory.raw_output.total_memory_all_gpus_gb / result.memory.memory_per_gpu_gb) : null;
+
+        const runnableClass = result.runnable ? "status-ok" : "status-danger";
+        const riskClass = result.risk_level === "low" ? "status-ok" : result.risk_level === "medium" ? "status-warn" : "status-danger";
+
+        document.getElementById("metrics").innerHTML = [
+          metric("Runnable", String(result.runnable), runnableClass),
+          metric("Risk level", result.risk_level, riskClass),
+          metric(
+            "Avg memory / GPU",
+            memory.memory_per_gpu_gb == null ? "n/a" : `${memory.memory_per_gpu_gb.toFixed(2)} / ${memory.gpu_memory_limit_gb.toFixed(0)} GB`
+          ),
+          metric("Utilization", memory.memory_utilization == null ? "n/a" : `${(memory.memory_utilization * 100).toFixed(1)}%`),
+          metric("Time", time.total_time_hours == null ? "n/a" : `${time.total_time_hours.toFixed(2)} h`),
+          metric("GPU-hours", time.gpu_hours == null ? "n/a" : time.gpu_hours.toFixed(2)),
+          metric("Cost", cost.estimated_cost == null ? "n/a" : `${cost.estimated_cost.toFixed(2)} ${cost.currency}`),
+          metric("Summary provider", data.summary_provider || "pending"),
+        ].join("");
+
+        document.getElementById("memoryNote").textContent =
+          gpuCount && memory.memory_per_gpu_gb != null
+            ? `Memory is shown as average per GPU for ${gpuCount} GPUs, compared against the per-GPU limit.`
+            : "Memory is shown as average per GPU, compared against the per-GPU limit.";
+
+        document.getElementById("rawResult").textContent = JSON.stringify(result, null, 2);
+      }
+
+      function renderSummary(data) {
+        if (data.summary_markdown) {
+          document.getElementById("summary").innerHTML = renderMarkdown(data.summary_markdown);
+        } else if (data.summary_error) {
+          document.getElementById("summary").innerHTML = `<p><strong>Summary unavailable.</strong></p><p>${escapeHtml(data.summary_error)}</p>`;
+        } else {
+          document.getElementById("summary").textContent = "No summary requested.";
+        }
+      }
+
+      function renderMarkdown(markdown) {
+        const lines = markdown.split(/\r?\n/);
+        let html = "";
+        let inList = false;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            if (inList) {
+              html += "</ul>";
+              inList = false;
+            }
+            continue;
+          }
+          if (trimmed.startsWith("### ")) {
+            if (inList) html += "</ul>";
+            inList = false;
+            html += `<h3>${inlineMarkdown(trimmed.slice(4))}</h3>`;
+            continue;
+          }
+          if (trimmed.startsWith("## ")) {
+            if (inList) html += "</ul>";
+            inList = false;
+            html += `<h2>${inlineMarkdown(trimmed.slice(3))}</h2>`;
+            continue;
+          }
+          if (trimmed.startsWith("# ")) {
+            if (inList) html += "</ul>";
+            inList = false;
+            html += `<h1>${inlineMarkdown(trimmed.slice(2))}</h1>`;
+            continue;
+          }
+          if (/^[-*]\s+/.test(trimmed)) {
+            if (!inList) {
+              html += "<ul>";
+              inList = true;
+            }
+            html += `<li>${inlineMarkdown(trimmed.replace(/^[-*]\s+/, ""))}</li>`;
+            continue;
+          }
+          if (inList) {
+            html += "</ul>";
+            inList = false;
+          }
+          html += `<p>${inlineMarkdown(trimmed)}</p>`;
+        }
+        if (inList) html += "</ul>";
+        return html;
+      }
+
+      function inlineMarkdown(text) {
+        return escapeHtml(text)
+          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+          .replace(/`([^`]+)`/g, "<code>$1</code>");
+      }
+
+      async function fetchJson(url, payload) {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+        }
+        return data;
+      }
+
+      async function runSummary(payload, result) {
+        setProgressStep("Done", "Done", "Running", "Visible");
+        startProgressAnimation(94, "Generating summary analysis", payload.provider === "deepseek" ? 18 : 10);
+        try {
+          const data = await fetchJson(`${API_BASE}/api/summary`, { ...payload, result });
+          stopProgressAnimation();
+          setProgress(100, "Summary complete", "Estimated time left: 0s");
+          setProgressStep("Done", "Done", "Done", "Complete");
+          renderSummary(data);
+          showStatus("Estimate and summary complete.", true);
+        } catch (err) {
+          stopProgressAnimation();
+          setProgress(100, "Summary finished with warning", "Estimated time left: 0s");
+          setProgressStep("Done", "Done", "Unavailable", "Complete");
+          renderSummary({ summary_markdown: "", summary_error: err.message || String(err) });
+          showStatus("Estimate is available. Summary failed or was unavailable.");
+        } finally {
+          document.getElementById("estimateButton").disabled = false;
+        }
+      }
+
+      async function estimate() {
+        document.getElementById("estimateButton").disabled = true;
+        document.getElementById("summary").textContent = "Waiting for summary analysis...";
+        try {
+          const payload = collectPayload();
+          showStatus("Validating inputs...");
+          setProgress(8, "Validating configuration", "Estimated time left: 2s");
+          setProgressStep("Running", "Waiting", "Waiting", "Waiting");
+
+          startProgressAnimation(62, "Running estimator pipeline", 3);
+          const estimatePayload = { config: payload.config, prices: payload.prices, provider: payload.provider };
+          const estimateData = await fetchJson(`${API_BASE}/api/estimate`, estimatePayload);
+          stopProgressAnimation();
+
+          renderResult(estimateData);
+          setProgress(72, "Estimate ready", payload.summarize ? "Estimated time left: 10-20s" : "Estimated time left: 0s");
+          setProgressStep("Done", "Done", payload.summarize ? "Queued" : "Skipped", "Visible");
+          showStatus("Estimate is ready. Rendering result immediately...");
+
+          if (!payload.summarize) {
+            renderSummary({ summary_markdown: "", summary_error: null });
+            setProgress(100, "Estimate complete", "Estimated time left: 0s");
+            setProgressStep("Done", "Done", "Skipped", "Complete");
+            showStatus("Estimate complete.", true);
+            document.getElementById("estimateButton").disabled = false;
+            return;
+          }
+
+          await runSummary(estimatePayload, estimateData.result);
+        } catch (err) {
+          stopProgressAnimation();
+          setProgress(0, "Idle", "Estimated time: n/a");
+          setProgressStep("Error", "Waiting", "Waiting", "Waiting");
+          showStatus(err.message || String(err));
+          document.getElementById("estimateButton").disabled = false;
+        }
+      }
+
+      document.getElementById("languageToggle").addEventListener("click", () => {
+        language = language === "en" ? "zh" : "en";
+        updateMeanings();
+      });
+
+      document.getElementById("loadExample").addEventListener("click", () => {
+        loadValues(example);
+      });
+
+      document.getElementById("clearForm").addEventListener("click", () => {
+        clearValues();
+      });
+
+      document.getElementById("estimateButton").addEventListener("click", estimate);
+
+      renderForm();
+      setProgressStep("Waiting", "Waiting", "Waiting", "Waiting");
+    </script>
+  </body>
+</html>

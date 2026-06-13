@@ -6,6 +6,10 @@ __pycache__/
 .mypy_cache/
 .DS_Store
 .env
+config.local.yaml
 outputs/
 reports/
 *.log
+web/node_modules/
+web/dist/
+web/.astro/

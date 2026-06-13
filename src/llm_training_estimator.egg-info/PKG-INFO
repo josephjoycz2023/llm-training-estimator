@@ -10,3 +10,6 @@ Requires-Dist: rich
 Requires-Dist: pandas
 Requires-Dist: tabulate
 Requires-Dist: fire
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: requests

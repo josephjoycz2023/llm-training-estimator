@@ -5,3 +5,6 @@ rich
 pandas
 tabulate
 fire
+fastapi
+uvicorn
+requests

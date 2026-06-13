@@ -10,7 +10,10 @@ dependencies = [
     "rich",
     "pandas",
     "tabulate",
-    "fire"
+    "fire",
+    "fastapi",
+    "uvicorn",
+    "requests"
 ]
 
 [project.scripts]

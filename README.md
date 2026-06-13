@@ -73,6 +73,8 @@ The MVP config is intentionally strict and split into these blocks:
 - `hardware`: GPU type/count/memory and efficiency assumptions.
 - `cost`: price profile key.
 
+Full field-level schema reference: [docs/yaml_schema.md](docs/yaml_schema.md).
+
 See:
 
 - `configs/example_qwen_7b_zero3.yaml`

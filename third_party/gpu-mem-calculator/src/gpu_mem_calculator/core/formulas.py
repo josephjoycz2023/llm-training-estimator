@@ -1,0 +1,280 @@
+"""Memory calculation formulas.
+
+This module contains the fundamental formulas for calculating GPU memory
+requirements for LLM training.
+"""
+
+from dataclasses import dataclass
+
+
+@dataclass
+class Precision:
+    """Precision information for a data type.
+
+    This is re-exported from utils.precision for convenience.
+    """
+
+    name: str
+    bits_per_param: int
+    bytes_per_param: float
+    is_integer: bool = False
+
+
+def calculate_parameter_memory(
+    num_params: int,
+    dtype: str,
+    num_gpus: int = 1,
+) -> float:
+    """Calculate memory in GB for model parameters.
+
+    Args:
+        num_params: Number of model parameters
+        dtype: Data type (e.g., "fp32", "fp16", "bf16", "int8", "int4")
+        num_gpus: Number of GPUs for distribution
+
+    Returns:
+        Memory in GB
+    """
+    from gpu_mem_calculator.utils.precision import gb_from_params
+
+    # Parameters are distributed across GPUs in data parallel training
+    # But for tensor/pipeline parallel, each GPU holds a portion
+    # We'll handle parallelism in the engine implementations
+    return gb_from_params(num_params, dtype)
+
+
+def calculate_gradient_memory(
+    num_params: int,
+    dtype: str,
+) -> float:
+    """Calculate memory in GB for gradients.
+
+    Gradients are typically stored in the same precision as parameters
+    for training (though updated in FP32).
+
+    Args:
+        num_params: Number of model parameters
+        dtype: Data type for gradients
+
+    Returns:
+        Memory in GB
+    """
+    from gpu_mem_calculator.utils.precision import gb_from_params
+
+    # Gradients are same size as parameters during training
+    return gb_from_params(num_params, dtype)
+
+
+def calculate_optimizer_memory(
+    num_params: int,
+    optimizer: str,
+) -> float:
+    """Calculate memory in GB for optimizer states.
+
+    Args:
+        num_params: Number of model parameters
+        optimizer: Optimizer type (adam, adamw, sgd, adamw_8bit)
+
+    Returns:
+        Memory in GB (for FP32 optimizer states)
+    """
+    from gpu_mem_calculator.utils.precision import gb_from_bytes
+
+    # Optimizer states are typically stored in FP32
+    # bytes_per_param = 4.0  # FP32
+
+    match optimizer.lower():
+        case "adam" | "adamw":
+            # Adam/AdamW optimizer states: 12 bytes per param
+            # - FP32 parameter copy: 4 bytes
+            # - Momentum (fp32): 4 bytes
+            # - Variance (fp32): 4 bytes
+            # Reference: https://blog.eleuther.ai/transformer-math/#optimizer-states
+            # Reference: https://www.microsoft.com/en-us/research/blog/zero-deepspeed-new-system-optimizations-enable-training-models-with-over-100-billion-parameters/
+            # Reference: https://deepspeed.readthedocs.io/en/latest/memory.html
+            optimizer_bytes_per_param = 12.0
+        case "adamw_8bit":
+            # 8-bit Adam: ~2 bytes per param (quantized states)
+            # Reference: bitsandbytes 8-bit optimizer
+            optimizer_bytes_per_param = 2.0
+        case "sgd":
+            # SGD: momentum (4 bytes) if using momentum, 0 if not
+            # Assuming momentum is used
+            optimizer_bytes_per_param = 4.0
+        case _:
+            # Default to Adam
+            optimizer_bytes_per_param = 12.0
+
+    total_bytes = num_params * optimizer_bytes_per_param
+    return gb_from_bytes(total_bytes)
+
+
+def calculate_activation_memory(
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    num_layers: int,
+    num_attention_heads: int,
+    tensor_parallel_size: int = 1,
+    activation_checkpointing: int = 0,
+    moe_enabled: bool = False,
+    num_experts: int = 1,
+    top_k: int = 1,
+    expert_intermediate_size: int | None = None,
+) -> float:
+    """Calculate approximate memory in GB for activations.
+
+    This provides an estimate based on transformer architecture. Actual
+    activation memory depends on many factors including the specific
+    model implementation and framework.
+
+    Reference: https://blog.eleuther.ai/transformer-math/#activations
+    Reference: https://arxiv.org/abs/2204.13323 ("Reducing Activation Recomputation
+               in Large Transformer Models")
+
+    According to EleutherAI Transformer Math 101, for selective activation
+    checkpointing (the most common approach), the formula is:
+
+        sbhL(10 + 24/t) bytes
+
+    Where:
+    - s = sequence length (seq_len)
+    - b = batch size (batch_size)
+    - h = hidden size (hidden_size)
+    - L = number of layers (num_layers)
+    - t = tensor parallel size (tensor_parallel_size)
+
+    This implementation uses a simplified heuristic that approximates
+    this formula: hidden_size * 16 bytes per token per layer. This
+    provides a reasonable estimate for typical model configurations
+    while being simple to understand and modify.
+
+    For MoE models, activation memory is reduced because only top_k experts
+    are active per token, not all experts.
+
+    Args:
+        batch_size: Batch size per GPU
+        seq_len: Sequence length
+        hidden_size: Hidden dimension size
+        num_layers: Number of transformer layers
+        num_attention_heads: Number of attention heads
+        tensor_parallel_size: Tensor parallelism degree
+        activation_checkpointing: Checkpointing level (0-4)
+        moe_enabled: Whether model uses Mixture of Experts
+        num_experts: Total number of experts (for MoE)
+        top_k: Number of active experts per token (for MoE)
+        expert_intermediate_size: Expert intermediate layer size (for MoE)
+
+    Returns:
+        Memory in GB
+    """
+    from gpu_mem_calculator.utils.precision import gb_from_bytes
+
+    # Defensive guard: ensure tensor_parallel_size is at least 1
+    tp_size = max(1, tensor_parallel_size)
+
+    # Approximate activation memory per token per layer
+    # Based on EleutherAI formula: sbhL(10 + 24/t)
+    # For t=1: ~10-24 bytes per token per layer depending on architecture
+    # We use 16 as a middle-ground estimate (LLaMA: ~12, GPT-3: ~20)
+    # This includes attention outputs, MLP activations, layer norms, etc.
+    # Reference: https://blog.eleuther.ai/transformer-math/#activations
+    activation_factor = 16  # Documented heuristic
+    bytes_per_token_per_layer = hidden_size * activation_factor
+
+    # For MoE models, adjust activation memory based on active experts
+    moe_multiplier = 1.0
+    if moe_enabled and num_experts > 1:
+        # Defensive guard: ensure num_experts is at least 1
+        safe_num_experts = max(1, num_experts)
+        # Only top_k experts are active per token
+        # Base ratio of active experts
+        expert_ratio = top_k / safe_num_experts
+
+        # Add router overhead (gating network activations)
+        router_overhead = 0.1
+
+        moe_multiplier = min(1.0, expert_ratio + router_overhead)
+
+    # For MoE, experts typically have larger intermediate sizes
+    if moe_enabled and expert_intermediate_size:
+        # Scale up slightly for larger expert intermediate layers
+        # Typical expert intermediate size is 4x hidden_size (vs 2x for dense)
+        size_ratio = expert_intermediate_size / (hidden_size * 2)
+        moe_multiplier *= min(2.0, size_ratio)  # Cap at 2x increase
+
+    # Total activation memory
+    total_bytes = (
+        batch_size * seq_len * num_layers * bytes_per_token_per_layer * moe_multiplier / tp_size
+    )
+
+    # Sanity check: activation memory should not exceed 1 PB (likely invalid config)
+    max_reasonable_bytes = 1e15  # 1 PB
+    if total_bytes > max_reasonable_bytes:
+        raise ValueError(
+            f"Unreasonable activation memory calculated: {total_bytes / 1e12:.2f} TB. "
+            f"Check your configuration (batch_size={batch_size}, seq_len={seq_len}, "
+            f"num_layers={num_layers}, hidden_size={hidden_size})."
+        )
+
+    # Adjust for activation checkpointing
+    # Level 0: No checkpointing (100% memory)
+    # Level 1: Checkpoint attention output (~80% memory)
+    # Level 2: Checkpoint attention input (~60% memory)
+    # Level 3: Checkpoint more (~40% memory)
+    # Level 4: Full checkpointing (~20% memory)
+    checkpoint_factors = [1.0, 0.8, 0.6, 0.4, 0.2]
+    # Defensive guard: ensure index is within bounds [0, 4]
+    checkpoint_index = max(0, min(activation_checkpointing, 4))
+    checkpoint_factor = checkpoint_factors[checkpoint_index]
+
+    total_bytes *= checkpoint_factor
+
+    return gb_from_bytes(total_bytes)
+
+
+def calculate_overhead(
+    total_memory: float,
+    overhead_factor: float = 0.2,
+) -> float:
+    """Calculate additional memory overhead.
+
+    This accounts for CUDA context, fragmentation, temporary buffers, etc.
+
+    Args:
+        total_memory: Total calculated memory in GB
+        overhead_factor: Fraction to add for overhead (default 20%)
+
+    Returns:
+        Overhead memory in GB
+    """
+    return total_memory * overhead_factor
+
+
+def estimate_largest_layer_params(
+    hidden_size: int,
+    num_attention_heads: int,
+    intermediate_size: int | None = None,
+) -> int:
+    """Estimate the largest layer parameters for ZeRO-3 calculations.
+
+    The largest layer is typically the MLP layer or attention projection.
+
+    Args:
+        hidden_size: Hidden dimension size
+        num_attention_heads: Number of attention heads
+        intermediate_size: MLP intermediate size (default 4 * hidden_size)
+
+    Returns:
+        Estimated number of parameters in the largest layer
+    """
+    if intermediate_size is None:
+        intermediate_size = 4 * hidden_size
+
+    # MLP layer: hidden_size * intermediate_size * 2 (for up and down projections)
+    mlp_params = hidden_size * intermediate_size * 2
+
+    # Attention output projection: hidden_size * hidden_size
+    attn_params = hidden_size * hidden_size
+
+    return max(mlp_params, attn_params)

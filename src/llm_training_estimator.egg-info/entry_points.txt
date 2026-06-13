@@ -1,0 +1,2 @@
+[console_scripts]
+lte = training_estimator.cli:app

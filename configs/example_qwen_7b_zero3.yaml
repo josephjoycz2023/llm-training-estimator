@@ -1,0 +1,32 @@
+model:
+  name: qwen-7b-like
+  architecture: dense
+  num_parameters: 7000000000
+  num_layers: 32
+  hidden_size: 4096
+  num_attention_heads: 32
+  vocab_size: 152064
+  max_seq_len: 4096
+
+training:
+  mode: full
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  dtype: bf16
+  optimizer: adamw
+  activation_checkpointing: 1
+  total_tokens: 1000000000
+
+parallelism:
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  data_parallel_size: 8
+  zero_stage: 3
+  sequence_parallel: false
+
+hardware:
+  name: h100_80g_8gpu
+  gpu_type: H100-80G
+  num_gpus: 8
+  gpu_memory_gb: 80
+  mfu: 0.35

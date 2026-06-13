@@ -1,0 +1,9 @@
+pydantic>=2
+pyyaml
+typer
+rich
+pandas
+tabulate
+pytest
+black
+ruff

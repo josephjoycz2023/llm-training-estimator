@@ -1,0 +1,25 @@
+[project]
+name = "llm-training-estimator"
+version = "0.1.0"
+description = "Estimate LLM training memory, time and cost using llm-analysis and gpu-mem-calculator."
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2",
+    "pyyaml",
+    "typer",
+    "rich",
+    "pandas",
+    "tabulate"
+]
+
+[project.scripts]
+lte = "training_estimator.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100

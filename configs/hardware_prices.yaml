@@ -1,0 +1,12 @@
+currency: CNY
+
+hardware:
+  h100_80g_8gpu:
+    gpu_type: H100-80G
+    gpu_count: 8
+    monthly_rental_cost: 45000
+
+  a100_80g_8gpu:
+    gpu_type: A100-80G
+    gpu_count: 8
+    monthly_rental_cost: 30000
